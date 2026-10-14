@@ -168,6 +168,8 @@ The command uses entry presence to decide whether to remove a credential. It rem
 - **Entry present but unreadable** — revocation needs a readable refresh token, so the entry is delete-only: stdout `Removed an unreadable Pipefy session entry (<issuer>).` and stderr `The stored session entry could not be read, so its refresh token could not be revoked at the IdP; that token remains valid at the server until natural expiry.` Nothing was revoked server-side, so the unrevoked refresh token stays usable at the IdP until it expires on its own.
 - **Keychain read failed and nothing was deleted** — presence could not be established, so the command claims neither removal nor a clean machine: stderr `Could not read the keychain to check for a stored session (<issuer>), and no entry was removed. A credential may still be present; check for it manually via your OS keychain (service: 'pipefy').` and exit 1.
 
+With a file store active (`keyring.cfg`, or `keyring-dpapi.cfg` on Windows), the exit 1 messages name the store file instead of the OS keychain and say to fix its permissions or delete the file.
+
 When no entry is stored, `pipefy auth logout` prints `Not signed in. Nothing to do.` and exits 0 — idempotent, matching `gh auth logout` and similar CLIs.
 
 ##### Exit codes
@@ -237,6 +239,8 @@ Stable installs (`uv tool install` / wheel) keep a stable Python binary path acr
 **Windows.** The default backend is a DPAPI-encrypted file (`EncryptedKeyring`) at `%APPDATA%/pipefy/keyring-dpapi.cfg`, so a store failure there usually means the config directory is not writable, and the CLI hint says so. A static `PIPEFY_TOKEN` also works.
 
 When `PIPEFY_KEYCHAIN_BACKEND=file` is active the backend reports as `PlaintextKeyring` (`keyring.cfg`), and the CLI hint switches to a config-directory writability check. The Windows default reports as `EncryptedKeyring` (`keyring-dpapi.cfg`); its hint also asks for DPAPI to be available for the Windows account, since some service accounts have no user profile.
+
+**Corrupt or unreadable file store.** When the cause names the store file (`Keyring file '<path>' is not a valid INI store (<error>)`, or `Permission denied: '<path>'`), the file exists but the CLI cannot open or parse it, so a writable config directory does not help. The login hint and the `pipefy auth logout` error both name the file (for a symlinked store, the file the link points to) and say to fix its permissions or delete the file; the login hint then says to run `pipefy auth login` again. Deleting the file signs you out locally without revoking the refresh token it held; when the file is only unreadable, fixing its permissions and running `pipefy auth logout` attempts to revoke that token first.
 
 ### `Missing Pipefy authentication. Set PIPEFY_TOKEN, configure PIPEFY_SERVICE_ACCOUNT_*, or run \`pipefy auth login\`.`
 
