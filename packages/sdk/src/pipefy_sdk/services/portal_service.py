@@ -24,8 +24,12 @@ from pipefy_sdk.models.portal import (
     CreatePortalElementInput,
     CreatePortalInput,
     DeletePortalElementInput,
+    InterfaceAction,
+    InterfaceActions,
     InterfaceDataSource,
     InterfaceDataSources,
+    OpenRecordAction,
+    OpenStartFormAction,
     PortalColor,
     PortalElementType,
     PortalPageLayoutRow,
@@ -397,7 +401,12 @@ def _stored_element(
 
 
 def _stored_custom_code_element(
-    interface: dict[str, Any], *, interface_uuid: str, page_id: str, element_id: str
+    interface: dict[str, Any],
+    *,
+    interface_uuid: str,
+    page_id: str,
+    element_id: str,
+    setting: str = "named data sources",
 ) -> dict[str, Any]:
     """Return ``customCode`` element ``element_id`` of page ``page_id`` of an HTML interface.
 
@@ -418,11 +427,74 @@ def _stored_custom_code_element(
     )
     if element["type"] != "customCode":
         msg = (
-            f"Element '{element_id}' is a '{element['type']}' element; named data "
-            "sources go on an HTML interface's customCode element."
+            f"Element '{element_id}' is a '{element['type']}' element; {setting} "
+            "go on an HTML interface's customCode element."
         )
         raise ValueError(msg)
     return element
+
+
+def _stored_data_source_inputs(element: dict[str, Any]) -> list[dict[str, Any]]:
+    """Map a read element's sources to ``DataSourceInput`` objects, unchanged.
+
+    A read returns ``filters`` parsed and adds ``repoName`` and ``repoType``, which
+    the input does not take.
+    """
+    inputs: list[dict[str, Any]] = []
+    for source in element.get("dataSources") or []:
+        entry: dict[str, Any] = {
+            key: source[key]
+            for key in ("id", "name", "repoId", "fieldKeys")
+            if source.get(key) is not None
+        }
+        if source.get("filters") is not None:
+            entry["filters"] = _filters_json_scalar(source["filters"])
+        inputs.append(entry)
+    return inputs
+
+
+def _unknown_action_references(
+    actions: InterfaceActions, element: dict[str, Any]
+) -> list[str]:
+    """Return one ``actions[index].key: problem`` clause per reference the element lacks.
+
+    Each ``sourceId`` must name one of the element's sources, each ``repoId`` be
+    the repo of one, and an ``openRecord``'s ``fieldKeys`` be keys of its source.
+    """
+    sources = {
+        source["id"]: source
+        for source in element.get("dataSources") or []
+        if source.get("id") is not None
+    }
+    source_ids = ", ".join(sources) or "none"
+    repo_ids = {source.get("repoId") for source in sources.values()}
+    problems: list[str] = []
+    for index, action in enumerate(actions.root):
+        where = f"actions[{index}]"
+        if isinstance(action, OpenStartFormAction):
+            if action.repo_id not in repo_ids:
+                problems.append(
+                    f"{where}.repoId: '{action.repo_id}' is not the repo of a data "
+                    "source of this element"
+                )
+            continue
+        source = sources.get(action.source_id)
+        if source is None:
+            problems.append(
+                f"{where}.sourceId: '{action.source_id}' is not a data source of "
+                f"this element; its sources are: {source_ids}"
+            )
+            continue
+        if isinstance(action, OpenRecordAction) and action.field_keys:
+            outside = [
+                key for key in action.field_keys if key not in source["fieldKeys"]
+            ]
+            if outside:
+                problems.append(
+                    f"{where}.fieldKeys: not in source '{action.source_id}': "
+                    f"{', '.join(outside)}"
+                )
+    return problems
 
 
 class PortalService:
@@ -749,7 +821,9 @@ class PortalService:
             PortalPermissionError: The caller cannot update the interface.
             PipefyGraphQLError: The caller cannot manage a repo that a new or
                 widened source reads (the API answers "Permission denied" with no
-                code); nothing is stored.
+                code), or an action in the element's ``metadata.actions`` names a
+                source the list removes or renames; nothing is stored. Change
+                that action with ``set_interface_actions`` first.
         """
         sources = InterfaceDataSources.model_validate(data_sources)
         element = _stored_custom_code_element(
@@ -774,6 +848,98 @@ class PortalService:
         _require_update_success(data, element_id=element_id, page_id=page_id)
         return _with_uuid_alias(
             {"id": element_id, "dataSources": sources.model_dump(by_alias=True)}
+        )
+
+    async def set_interface_actions(
+        self,
+        page_id: str,
+        element_id: str,
+        actions: list[InterfaceAction | dict[str, Any]],
+        *,
+        interface_uuid: str,
+        editable: bool | None = None,
+    ) -> dict[str, Any]:
+        """Replace the actions of an HTML interface's ``customCode`` element.
+
+        Reads the element first, checks each action against its data sources, and
+        stores the actions as ``metadata.actions``. Every other metadata key and
+        the data sources are sent back unchanged, since the update replaces both;
+        ``editable`` is kept unless passed. Set the sources with
+        ``set_interface_sources`` before the actions that name them.
+
+        Args:
+            page_id: Page holding the element.
+            element_id: The page's ``customCode`` element.
+            actions: The element's complete action list; ``[]`` removes them all.
+                Each action has ``actionId`` (the value of the HTML's
+                ``data-pfy-action``) and ``kind``: ``openStartForm`` with
+                ``repoId``, ``openRecord`` with ``sourceId`` and optional
+                ``display``, ``fieldKeys`` and ``pageId``, or
+                ``triggerAutomation`` with ``sourceId``, ``automationIds`` and
+                optional ``label``.
+            interface_uuid: HTML interface holding the page.
+            editable: Whether viewers can save edits to the element's
+                ``data-pfy-editable`` fields; ``None`` keeps the stored flag.
+
+        Returns:
+            The element ``id`` (and ``uuid``), the ``actions`` as parsed and sent,
+            and the ``editable`` flag sent. This echoes the input once
+            ``updateElement`` reports success; it is not read back. Call
+            ``get_html_interface`` for the stored ``metadata.actions``.
+
+        Raises:
+            pydantic.ValidationError: ``actions`` breaks an action rule; nothing
+                is sent.
+            ValueError: The element is not on page ``page_id``, is not
+                ``customCode``, lacks a source or repo an action names, or the
+                update reports ``success=false``.
+            PortalPermissionError: The caller cannot update the interface.
+            PipefyGraphQLError: The API refused an action, for example an
+                automation id that is not a manually triggered automation of the
+                source's repo, or a ``pageId`` that is not a record layout page;
+                nothing is stored.
+        """
+        parsed = InterfaceActions.model_validate(actions)
+        element = _stored_custom_code_element(
+            await self.get_html_interface(interface_uuid),
+            interface_uuid=interface_uuid,
+            page_id=page_id,
+            element_id=element_id,
+            setting="actions",
+        )
+        if parsed.root and not element.get("dataSources"):
+            msg = (
+                f"Element '{element_id}' has no data sources, and every action "
+                "names one. Set them with set_interface_sources first."
+            )
+            raise ValueError(msg)
+        problems = _unknown_action_references(parsed, element)
+        if problems:
+            raise ValueError("; ".join(problems))
+        sent_actions = parsed.model_dump(by_alias=True, exclude_none=True)
+        metadata = element.get("metadata")
+        sent_editable = element["editable"] if editable is None else editable
+        data = await _execute_query_with_portal_errors(
+            self.execute_interfaces_query,
+            UPDATE_ELEMENT_MUTATION,
+            {
+                "input": {
+                    "element_id": element_id,
+                    "page_id": page_id,
+                    "metadata": _serialize_interfaces_json(
+                        {
+                            **(metadata if isinstance(metadata, dict) else {}),
+                            "actions": sent_actions,
+                        }
+                    ),
+                    "editable": sent_editable,
+                    "data_sources": _stored_data_source_inputs(element),
+                }
+            },
+        )
+        _require_update_success(data, element_id=element_id, page_id=page_id)
+        return _with_uuid_alias(
+            {"id": element_id, "actions": sent_actions, "editable": sent_editable}
         )
 
     async def get_interface_html_guidelines(
