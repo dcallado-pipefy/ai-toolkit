@@ -4100,3 +4100,23 @@ def test_html_interface_set_actions_api_refusal_passes_its_message_exit_1(
 
     assert result.exit_code == 1
     assert message in result.stderr
+
+
+@pytest.mark.parametrize("option", ["--interface-uuid", "--page-id", "--element-id"])
+def test_html_interface_set_actions_rejects_blank_id_exit_2(
+    runner, clean_pipefy_env, saved_cwd, oauth_env, option
+):
+    oauth_env("html-interface-set-actions-blank-id")
+    mock_client = MagicMock()
+    mock_client.set_interface_actions = AsyncMock()
+    argv = list(_SET_ACTIONS_ARGV)
+    argv[argv.index(option) + 1] = "   "
+
+    with patch(
+        "pipefy_cli.commands._common.get_authenticated_client",
+        return_value=mock_client,
+    ):
+        result = runner.invoke(app, [*argv, "--actions", "[]"])
+
+    assert result.exit_code == 2
+    mock_client.set_interface_actions.assert_not_called()
