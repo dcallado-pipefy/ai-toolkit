@@ -242,6 +242,7 @@ Nested GraphQL/internal_api `success: false` → MCP top-level `{ success: false
 | `list_interface_repos` | `pipefy portal html-interface repos --organization-id <id> [--interface-uuid <uuid>] [--repo-name <name>]` |
 | `get_interface_repo_fields` | `pipefy portal html-interface repo-fields --repo-uuid <uuid> [--interface-uuid <uuid>]` |
 | `set_interface_sources` | `pipefy portal html-interface set-sources --interface-uuid <uuid> --page-id <id> --element-id <id> --data-sources '[…]'` |
+| `set_interface_actions` | `pipefy portal html-interface set-actions --interface-uuid <uuid> --page-id <id> --element-id <id> --actions '[…]' [--editable/--no-editable]` |
 
 ---
 
