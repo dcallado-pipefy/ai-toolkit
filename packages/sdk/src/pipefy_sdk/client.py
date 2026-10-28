@@ -2313,8 +2313,9 @@ class PipefyClient:
                 ``customCode``, lacks a source or repo an action names, or the
                 update reports ``success=false``.
             PortalPermissionError: The caller cannot update the interface.
-            PipefyGraphQLError: The API refused an action (for example an
-                automation id that is not manually triggered); nothing is stored.
+            PipefyGraphQLError: No interface has ``interface_uuid``, or the API
+                refused an action (for example an automation id that is not
+                manually triggered); nothing is stored.
         """
         return await self._portal_service.set_interface_actions(
             page_id,

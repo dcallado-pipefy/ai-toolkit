@@ -894,10 +894,11 @@ class PortalService:
                 ``customCode``, lacks a source or repo an action names, or the
                 update reports ``success=false``.
             PortalPermissionError: The caller cannot update the interface.
-            PipefyGraphQLError: The API refused an action, for example an
-                automation id that is not a manually triggered automation of the
-                source's repo, or a ``pageId`` that is not a record layout page;
-                nothing is stored.
+            PipefyGraphQLError: No interface has ``interface_uuid`` (the API
+                answers a missing uuid with an error), or the API refused an
+                action, for example an automation id that is not a manually
+                triggered automation of the source's repo, or a ``pageId`` that
+                is not a record layout page; nothing is stored.
         """
         parsed = InterfaceActions.model_validate(actions)
         element = _stored_custom_code_element(
@@ -910,7 +911,7 @@ class PortalService:
         if parsed.root and not element.get("dataSources"):
             msg = (
                 f"Element '{element_id}' has no data sources, and every action "
-                "names one. Set them with set_interface_sources first."
+                "names one. Add the element's sources first."
             )
             raise ValueError(msg)
         problems = _unknown_action_references(parsed, element)
