@@ -16,6 +16,7 @@ All commands sit under `pipefy portal html-interface`, except deleting a duplica
 | `create_html_interface` | `pipefy portal html-interface create` |
 | `set_interface_sources` | `pipefy portal html-interface set-sources` |
 | `write_interface_html` | `pipefy portal html-interface write` |
+| `set_interface_actions` | No CLI command yet; use the MCP tool. |
 | `delete_portal` (duplicate cleanup) | `pipefy portal delete` |
 
 ```bash
