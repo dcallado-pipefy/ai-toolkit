@@ -54,7 +54,7 @@ If the user asks for a "page" and it is unclear whether they mean a standalone H
 - **Bind data exactly as `dataPfyVocabulary` says.** It says what each `data-pfy-*` attribute does, for most which element it goes on, and the value it takes. The validator only checks that an attribute is allowed, so it accepts a binding in the wrong place.
 - **Every write is live.** `create_html_interface`, `write_interface_html`, `set_interface_sources`, and `set_interface_actions` change what visitors see at once. A specific request from the user ("rename the heading to X") is approval for that change. Before anything beyond it, such as rewriting markup they did not mention or removing a source they still use, show the user the change and get their approval.
 - **Keep the live page reading only declared sources.** HTML that reads a source id the element does not declare renders blank, with no error. Add a source before writing the HTML that reads it. Remove or rename a source only after the live HTML no longer reads it.
-- **Declare an action before the HTML runs it.** A `data-pfy-action` button runs only an action in the element's `metadata.actions`; an undeclared one does nothing. Order the calls sources, then actions, then HTML. A `data-pfy-editable` field saves a viewer's edit only when the element is `editable` and the field is in a source's `fieldKeys`.
+- **Declare an action before the HTML runs it.** A `data-pfy-action` button runs only an action in the element's `metadata.actions`; an undeclared one runs no action. Order the calls sources, then actions, then HTML. A `data-pfy-editable` field saves a viewer's edit only on an `editable` element; `dataPfyVocabulary` says which edits the API then accepts.
 - **Fix every violation before writing again.** A rejected write stores nothing and lists every violation. Fix all of them in one pass, then write again. If the HTML came from the user, show them the violations and a version that follows the rules, and publish only once they agree.
 
 ## Steps — create a page
@@ -91,7 +91,7 @@ If the user asks for a "page" and it is unclear whether they mean a standalone H
 
    The result carries the new interface's `uuid` and its page and element ids. Tell the user the interface's name and `uuid`.
 
-6. **Declare actions** if the page has `data-pfy-action` buttons or `data-pfy-editable` fields, with the page and element ids from the result (see step 3 of the next section). Until then the buttons do nothing.
+6. **Declare actions** if the page has `data-pfy-action` buttons or `data-pfy-editable` fields, with the page and element ids from the result (see step 3 of the next section). Until then the buttons run no action.
 
 ## Steps — change an existing page
 
@@ -122,7 +122,7 @@ If the user asks for a "page" and it is unclear whether they mean a standalone H
    write_interface_html page_id=<page_id> element_id=<element_id> content=<document>
    ```
 
-5. **Remove or rename sources** the new HTML no longer reads, if the user wants them gone, with one more `set_interface_sources` call that sends the complete list. A source an action names cannot go first: drop or change those actions with `set_interface_actions`, then update the sources.
+5. **Remove or rename sources** the new HTML no longer reads, if the user wants them gone, with one more `set_interface_sources` call that sends the complete list. The update is refused while an action names a source the list drops, so drop or change those actions with `set_interface_actions` first.
 
 ## Success criteria
 
@@ -142,8 +142,9 @@ If the user asks for a "page" and it is unclear whether they mean a standalone H
 - **A repo is missing from `list_interface_repos`.** It is unpublished, or the caller is not its admin. An empty list can also mean the organization id is wrong: the listing does not report an unknown organization or interface.
 - **`get_interface_html` refuses the interface.** It is a grid-layout portal or sub-portal; use `pipefy-portal-setup`.
 - **Unsure what a source update stored.** `set_interface_sources` returns the sources as sent, not as stored. Read them back with `get_interface_html`.
-- **A button does nothing.** Its `data-pfy-action` names no declared action, or an `openRecord` or `triggerAutomation` button sits outside a record. Compare the HTML with the element's `metadata.actions` from `get_interface_html`.
+- **A button runs no action.** Its `data-pfy-action` names no declared action, or an `openRecord` or `triggerAutomation` button sits outside a record. Compare the HTML with the element's `metadata.actions` from `get_interface_html`.
 - **An action was rejected.** A `sourceId` or `repoId` the element does not declare, or `fieldKeys` outside the source, is refused before the update and nothing is stored. Set the sources first, then the actions.
+- **A source update is refused because of an action.** Every element update rechecks the stored actions, so one whose source, page or automation is gone blocks it. Change or drop that action with `set_interface_actions`, then retry.
 
 ## See also
 

@@ -317,10 +317,11 @@ class PortalTools:
             - ``filters``: optional filter tree in the format
               ``get_interface_html_guidelines`` describes, or null.
 
-            At most 10 sources. A source that an action in the element's
-            ``metadata.actions`` names cannot be removed or renamed: the update
-            is refused until ``set_interface_actions`` drops or changes that
-            action. Returns the element ``uuid`` and the ``dataSources`` as sent,
+            At most 10 sources. The update is refused while an action in the
+            element's ``metadata.actions`` fails the API's checks: it names a
+            source the list drops, or a page or automation that was deleted.
+            Change or drop that action with ``set_interface_actions`` first.
+            Returns the element ``uuid`` and the ``dataSources`` as sent,
             once the update reports success; they are not read back. Call
             ``get_interface_html`` for the stored sources.
 
@@ -376,7 +377,7 @@ class PortalTools:
 
             Declare actions after ``set_interface_sources`` and before writing the
             HTML that names them: a ``<button data-pfy-action="<actionId>">``
-            runs the action, and an undeclared ``actionId`` does nothing. The list
+            runs the action, and an undeclared ``actionId`` runs no action. The list
             replaces the element's actions (``[]`` removes them all) and is stored
             as ``metadata.actions``; the element's sources and other settings are
             kept. Each action has ``actionId`` (1 to 64 letters, digits,
@@ -403,10 +404,10 @@ class PortalTools:
             container with ``data-pfy-record``); ``get_interface_html_guidelines``
             describes both in ``dataPfyVocabulary``. At most 50 actions.
 
-            ``editable`` controls ``data-pfy-editable`` fields: viewers who do
-            not manage both the interface and the repo can save an edit only when
-            it is true and the field is in a source's ``fieldKeys``. Omit it to
-            keep the current value.
+            ``editable`` turns on viewer edits for the element's
+            ``data-pfy-editable`` fields; ``dataPfyVocabulary`` in
+            ``get_interface_html_guidelines`` says which edits the API then
+            accepts. Omit it to keep the current value.
 
             Returns the element ``uuid``, the ``actions`` and the ``editable``
             flag as sent, once the update reports success; they are not read
@@ -565,9 +566,9 @@ class PortalTools:
             A ``data-pfy-action`` runs only an action declared in the element's
             ``metadata.actions``, so declare actions with ``set_interface_actions``
             before writing HTML that names them. A ``data-pfy-editable`` field
-            saves a viewer's edit only when the element is ``editable`` and the
-            field is in a source's ``fieldKeys``; ``set_interface_actions`` sets
-            the flag.
+            saves a viewer's edit only on an ``editable`` element, which
+            ``set_interface_actions`` sets; ``dataPfyVocabulary`` says which
+            edits the API then accepts.
 
             Args:
                 page_id: Page holding the element (``get_interface_html``
@@ -639,7 +640,7 @@ class PortalTools:
             At most 10 sources.
 
             Actions are declared on the created element, so a ``data-pfy-action``
-            in ``html`` does nothing until ``set_interface_actions`` declares it,
+            in ``html`` runs no action until ``set_interface_actions`` declares it,
             using the page and element uuids this returns. That tool also sets
             ``editable``, which ``data-pfy-editable`` fields need to save.
 
