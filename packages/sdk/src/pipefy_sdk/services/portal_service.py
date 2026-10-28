@@ -821,9 +821,11 @@ class PortalService:
             PortalPermissionError: The caller cannot update the interface.
             PipefyGraphQLError: The caller cannot manage a repo that a new or
                 widened source reads (the API answers "Permission denied" with no
-                code), or an action in the element's ``metadata.actions`` names a
-                source the list removes or renames; nothing is stored. Change
-                that action with ``set_interface_actions`` first.
+                code), or an action in the element's ``metadata.actions`` no
+                longer passes the API's checks: it names a source the list
+                removes or renames, or the page or automation it names was
+                deleted. Nothing is stored; change or drop that action with
+                ``set_interface_actions`` first.
         """
         sources = InterfaceDataSources.model_validate(data_sources)
         element = _stored_custom_code_element(

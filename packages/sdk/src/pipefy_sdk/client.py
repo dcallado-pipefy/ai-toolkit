@@ -2266,8 +2266,9 @@ class PipefyClient:
             PortalPermissionError: The caller cannot update the interface.
             PipefyGraphQLError: The caller cannot manage a repo that a new or
                 widened source reads, or an action in the element's
-                ``metadata.actions`` names a source the list removes or renames;
-                nothing is stored. Change that action with
+                ``metadata.actions`` no longer passes the API's checks (it names
+                a source the list drops, or a deleted page or automation).
+                Nothing is stored; change or drop that action with
                 ``set_interface_actions`` first.
         """
         return await self._portal_service.set_interface_sources(
