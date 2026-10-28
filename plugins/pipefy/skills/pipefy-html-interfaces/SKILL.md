@@ -142,7 +142,7 @@ If the user asks for a "page" and it is unclear whether they mean a standalone H
 - **A repo is missing from `list_interface_repos`.** It is unpublished, or the caller is not its admin. An empty list can also mean the organization id is wrong: the listing does not report an unknown organization or interface.
 - **`get_interface_html` refuses the interface.** It is a grid-layout portal or sub-portal; use `pipefy-portal-setup`.
 - **Unsure what a source update stored.** `set_interface_sources` returns the sources as sent, not as stored. Read them back with `get_interface_html`.
-- **A button runs no action.** Its `data-pfy-action` names no declared action, or an `openRecord` or `triggerAutomation` button sits outside a record. Compare the HTML with the element's `metadata.actions` from `get_interface_html`.
+- **A button runs no action.** Its `data-pfy-action` names no declared action (the button then ends with `data-pfy-state="error"`), or an `openRecord` or `triggerAutomation` button sits outside a record. Compare the HTML with the element's `metadata.actions` from `get_interface_html`.
 - **An action was rejected.** A `sourceId` or `repoId` the element does not declare, or `fieldKeys` outside the source, is refused before the update and nothing is stored. Set the sources first, then the actions.
 - **A source update is refused because of an action.** Every element update rechecks the stored actions, so one whose source, page or automation is gone blocks it. Change or drop that action with `set_interface_actions`, then retry.
 
