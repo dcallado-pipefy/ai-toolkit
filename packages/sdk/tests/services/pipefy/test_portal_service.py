@@ -3414,6 +3414,61 @@ async def test_set_interface_actions_lists_every_unknown_reference() -> None:
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_set_interface_actions_empty_list_needs_no_sources() -> None:
+    """Removing every action from an element that has no sources is allowed."""
+    service, interfaces_executor = _set_sources_service(
+        _html_interface_with_custom_code(
+            metadata={**_HTML_ELEMENT_METADATA, "actions": [_APPROVE_ACTION]}
+        )
+    )
+
+    await _set_request_actions(service, [])
+
+    assert json.loads(_sent_update_input(interfaces_executor)["metadata"]) == {
+        **_HTML_ELEMENT_METADATA,
+        "actions": [],
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_set_interface_actions_open_record_without_field_keys_is_sent() -> None:
+    """``fieldKeys`` is optional on openRecord, so there is nothing to check."""
+    service, interfaces_executor = _set_sources_service(_interface_with_sources())
+    action = {"actionId": "details", "kind": "openRecord", "sourceId": "open-requests"}
+
+    await _set_request_actions(service, [action])
+
+    sent = json.loads(_sent_update_input(interfaces_executor)["metadata"])
+    assert sent["actions"] == [action]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_set_interface_actions_ignores_a_stored_source_without_an_id() -> None:
+    """A read source may carry a null id; it is no action's target and is not listed."""
+    service, _interfaces_executor = _set_sources_service(
+        _html_interface_with_custom_code(
+            data_sources=[
+                _STORED_OPEN_REQUESTS_SOURCE,
+                {**_STORED_ALL_SUPPLIERS_SOURCE, "id": None},
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        await _set_request_actions(
+            service, [{**_APPROVE_ACTION, "sourceId": "closed-requests"}]
+        )
+
+    assert str(excinfo.value) == (
+        "actions[0].sourceId: 'closed-requests' is not a data source of this "
+        "element; its sources are: open-requests"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_set_interface_actions_on_an_element_with_no_sources_says_to_set_them() -> (
     None
 ):
