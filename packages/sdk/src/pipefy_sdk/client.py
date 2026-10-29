@@ -594,6 +594,9 @@ class PipefyClient:
             field_id: Table field ID to update.
             table_id: Table ID containing this field (required by API).
             **attrs: Other UpdateTableFieldInput attributes.
+
+        Raises:
+            ValueError: When ``table_id`` is omitted or ``None``.
         """
         return await self._table_service.update_table_field(
             field_id, table_id=table_id, **attrs

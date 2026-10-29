@@ -485,11 +485,11 @@ async def test_pipefy_client_facade_delegates_to_services_without_modifying_args
         "t", "Lab", "short_text", required=True
     )
 
-    assert await client.update_table_field("fid", label="X") == {
+    assert await client.update_table_field("fid", table_id="tbl_1", label="X") == {
         "ok": "update_table_field"
     }
     table_service.update_table_field.assert_awaited_once_with(
-        "fid", table_id=None, label="X"
+        "fid", table_id="tbl_1", label="X"
     )
 
     assert await client.delete_table_field(9, "tbl_1") == {"ok": "delete_table_field"}
