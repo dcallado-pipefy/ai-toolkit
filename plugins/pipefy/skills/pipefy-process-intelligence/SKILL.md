@@ -62,7 +62,7 @@ The user asks to analyze or improve an existing process:
 
    For each active agent (`disabledAt` is null), read its behaviors to see which phases it already acts on:
 
-   Operation: `get_ai_agent uuid=<AGENT_UUID>`
+   Operation: `get_ai_agent` with the agent's UUID
 
    Look for: no AI agents despite manual categorization or triage patterns, and hops an active behavior already covers (do not report those as manual).
 
