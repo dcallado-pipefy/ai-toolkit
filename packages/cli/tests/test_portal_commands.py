@@ -2946,7 +2946,7 @@ def test_html_interface_write_rejects_non_utf8_content_file_exit_2(
         )
     assert result.exit_code == 2
     assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert "is not valid UTF-8 text" in result.stderr
+    assert "is not valid UTF-8 text" in _panel_text(result.stderr)
     mock_client.write_html_document.assert_not_called()
 
 
@@ -2977,7 +2977,7 @@ def test_html_interface_write_rejects_oversized_content_file_exit_2(
             ],
         )
     assert result.exit_code == 2
-    assert "exceeds 2097152 bytes" in result.stderr
+    assert "exceeds 2097152 bytes" in _panel_text(result.stderr)
     mock_client.write_html_document.assert_not_called()
 
 
