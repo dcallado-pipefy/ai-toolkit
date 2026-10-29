@@ -473,8 +473,9 @@ InterfaceAction = Annotated[
 ]
 
 INTERFACE_ACTION_KINDS: tuple[str, ...] = tuple(
-    get_args(action.model_fields["kind"].annotation)[0]
+    kind
     for action in (OpenStartFormAction, OpenRecordAction, TriggerAutomationAction)
+    for kind in get_args(action.model_fields["kind"].annotation)
 )
 
 
