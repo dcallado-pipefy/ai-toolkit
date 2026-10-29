@@ -103,7 +103,10 @@ def field_update(
 ) -> None:
     """Update a phase field (pass attributes via ``--extra`` JSON)."""
 
-    extra = parse_json_object(extra_json, "--extra")
+    extra = reject_reserved_extra_keys(
+        parse_json_object(extra_json, "--extra"),
+        reserved=frozenset({"id"}),
+    )
     if not extra:
         raise typer.BadParameter("Provide --extra with a non-empty JSON object.")
 

@@ -20,6 +20,7 @@ from pipefy_cli.commands._common import (
     confirm_destructive,
     graphql_input_or_bad_parameter,
     parse_json_object,
+    reject_reserved_extra_keys,
     resource_id_argument,
     run_cli_command,
     validate_cards_page_size,
@@ -221,7 +222,10 @@ def phase_update(
     it and create it again with the sort key.
     """
 
-    extra = parse_json_object(extra_json, "--extra")
+    extra = reject_reserved_extra_keys(
+        parse_json_object(extra_json, "--extra"),
+        reserved=frozenset({"id"}),
+    )
     update_attrs: dict[str, Any] = {}
     if name is not None:
         update_attrs["name"] = name

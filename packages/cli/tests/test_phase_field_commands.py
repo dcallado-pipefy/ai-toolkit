@@ -79,6 +79,55 @@ def test_phase_update_resolves_name_json(
     json.loads(result.stdout)
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        [
+            "field",
+            "update",
+            "priority",
+            "--extra",
+            '{"id": "other_field", "label": "L"}',
+        ],
+        [
+            "phase",
+            "update",
+            "original",
+            "--extra",
+            '{"id": "other_phase", "name": "N"}',
+        ],
+        [
+            "phase",
+            "update",
+            "original",
+            "--extra",
+            '{"id": "other_phase", "description": "D"}',
+        ],
+    ],
+)
+def test_update_rejects_extra_id_before_client_creation(
+    runner, clean_pipefy_env, saved_cwd, oauth_env, args
+):
+    oauth_env("update-reserved")
+    mock_client = MagicMock()
+    mock_client.get_phase_fields = AsyncMock(return_value={"phase_name": "Original"})
+    mock_client.update_phase = AsyncMock(return_value={"updatePhase": {}})
+    mock_client.update_phase_field = AsyncMock(return_value={"updatePhaseField": {}})
+    with patch(
+        "pipefy_cli.commands._common.get_authenticated_client",
+        return_value=mock_client,
+    ) as get_client:
+        result = runner.invoke(app, args)
+    assert result.exit_code == 2
+    assert "--extra" in result.stderr
+    assert "'id'" in result.stderr
+    assert "dedicated argument" in result.stderr
+    get_client.assert_not_called()
+    mock_client.get_phase_fields.assert_not_awaited()
+    mock_client.update_phase.assert_not_awaited()
+    mock_client.update_phase_field.assert_not_awaited()
+
+
 def test_phase_delete_yes(runner, clean_pipefy_env, saved_cwd, oauth_env):
     oauth_env("ph-del")
     mock_client = MagicMock()
@@ -185,16 +234,22 @@ def test_field_create_type_completion_offers_field_type_ids(runner):
     assert "short_text" not in result.output
 
 
-def test_field_update_forwards_extra_phase_id_for_slug_resolution(
-    runner, clean_pipefy_env, saved_cwd, oauth_env
+@pytest.mark.parametrize(
+    ("hints", "phase_id", "pipe_id"),
+    [
+        ({"phase_id": "343162749"}, "343162749", None),
+        ({"pipe_id": "pipe-context"}, None, "pipe-context"),
+        (
+            {"phase_id": "343162749", "pipe_id": "pipe-context"},
+            "343162749",
+            "pipe-context",
+        ),
+    ],
+)
+def test_field_update_forwards_extra_hints_for_slug_resolution(
+    runner, clean_pipefy_env, saved_cwd, oauth_env, hints, phase_id, pipe_id
 ):
-    """``--extra '{"phase_id": ...}'`` reaches ``client.update_phase_field``.
-
-    Locks the CLI side of the smoke-2026-05-15 slug-resolution fix: the SDK can only
-    map ``"priority"`` to its ``internal_id`` if the CLI forwards ``phase_id``.
-    ``UpdatePhaseFieldInput`` has no such field, so the CLI lifts it out of
-    ``--extra`` and passes it as the keyword argument instead of sending it.
-    """
+    """Field resolution hints reach the SDK without entering the mutation input."""
     oauth_env("fld-upd")
     mock_client = MagicMock()
     mock_client.update_phase_field = AsyncMock(
@@ -211,15 +266,15 @@ def test_field_update_forwards_extra_phase_id_for_slug_resolution(
                 "update",
                 "priority",
                 "--extra",
-                '{"label": "Priority", "phase_id": "343162749"}',
+                json.dumps({"label": "Priority", **hints}),
                 "--json",
             ],
         )
     assert result.exit_code == 0, result.stdout
     mock_client.update_phase_field.assert_awaited_once_with(
         UpdatePhaseFieldInput(id="priority", label="Priority"),
-        phase_id="343162749",
-        pipe_id=None,
+        phase_id=phase_id,
+        pipe_id=pipe_id,
     )
 
 
