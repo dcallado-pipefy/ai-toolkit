@@ -6,6 +6,7 @@ import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from click import unstyle
 from pipefy_sdk.graphql_inputs import (
     CreatePhaseFieldInput,
     UpdatePhaseFieldInput,
@@ -105,9 +106,14 @@ def test_phase_update_resolves_name_json(
         ],
     ],
 )
+@pytest.mark.parametrize("colored", [False, True])
 def test_update_rejects_extra_id_before_client_creation(
-    runner, clean_pipefy_env, saved_cwd, oauth_env, args
+    runner, clean_pipefy_env, saved_cwd, oauth_env, monkeypatch, args, colored
 ):
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm-256color" if colored else "dumb")
+    monkeypatch.setenv("FORCE_COLOR" if colored else "NO_COLOR", "1")
     oauth_env("update-reserved")
     mock_client = MagicMock()
     mock_client.get_phase_fields = AsyncMock(return_value={"phase_name": "Original"})
@@ -119,9 +125,12 @@ def test_update_rejects_extra_id_before_client_creation(
     ) as get_client:
         result = runner.invoke(app, args)
     assert result.exit_code == 2
-    assert "--extra" in result.stderr
-    assert "'id'" in result.stderr
-    assert "dedicated argument" in result.stderr
+    if colored:
+        assert "\x1b[" in result.stderr
+    error_text = " ".join(unstyle(result.stderr).replace("│", " ").split())
+    assert "--extra" in error_text
+    assert "'id'" in error_text
+    assert "dedicated argument" in error_text
     get_client.assert_not_called()
     mock_client.get_phase_fields.assert_not_awaited()
     mock_client.update_phase.assert_not_awaited()
