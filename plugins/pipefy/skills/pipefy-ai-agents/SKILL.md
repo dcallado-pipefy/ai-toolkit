@@ -185,7 +185,9 @@ Inside `actionParams.aiBehaviorParams` a behavior may also carry:
 }
 ```
 
-### 6 — Validate (recommended for complex behaviors)
+### 6 — Validate before every create and update
+
+A rejected update is not rolled back (see [Failure modes](#failure-modes)), so run this before every `create_ai_agent` and `update_ai_agent`, however small the change, and fix every problem it reports first.
 
 `validate_ai_agent_behaviors(pipe_id, behaviors)` checks:
 - Output field IDs (`fieldsAttributes[].fieldId`) exist in the pipe
@@ -320,7 +322,7 @@ Per behavior you can give `template_params` (or `placeholders`) with `str → st
 ## Success criteria
 
 - Agent enablement matches the intended state: `get_ai_agent.disabledAt` is null when active; `behaviors[].active` does not establish agent enablement.
-- `validate_ai_agent_behaviors` reports no errors before creation.
+- `validate_ai_agent_behaviors` reports no errors before each create and update.
 - Agent appears in the Pipefy UI under the pipe's AI settings.
 
 ## Failure modes
