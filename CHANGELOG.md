@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **SDK `create_pipe`, phases, start form and labels**: `PipefyClient.create_pipe` takes optional `phases` (`CreatePipePhase`: `name`, `done`), `start_form_fields` (`CreatePipeStartFormField`) and `labels` (`CreatePipeLabel`), so a pipe can be built in one call. With `phases`, the pipe gets exactly those phases, in order, each connected to the phases beside it, and Pipefy's default Inbox, Doing and Done are deleted. Pipefy's own `phases` input is not used: it skips a phase named like a default and puts the requested phases between the defaults. Blank or repeated phase names raise `ValueError` before any call. If deleting a default phase or creating a requested phase fails, `PipePhaseSetupError` carries the new pipe's `pipe_id` and the phases created so far, with the failed call's error as `__cause__`. The result now lists the new pipe's phases, start form fields (with `internal_id`) and labels with their ids, with or without the new arguments, so the MCP `create_pipe` tool returns them too.
 
+### Fixed
+
+- Agent reads and update responses now include `eventParams.kindOfSla`, preserving the SLA trigger type when a behavior is read and sent back in an update.
+
 ## [0.5.5-beta.1] - 2026-10-26
 
 ### Added
