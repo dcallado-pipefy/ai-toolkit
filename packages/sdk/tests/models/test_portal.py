@@ -10,6 +10,7 @@ from _shared.fixture_ids import EXAMPLE_PIPE_REPO_ID
 from pydantic import ValidationError
 
 from pipefy_sdk.models.portal import (
+    INTERFACE_ACTION_KINDS,
     CreatePortalElementInput,
     DeletePortalElementInput,
     InterfaceActions,
@@ -861,4 +862,13 @@ def test_interface_actions_takes_a_64_character_action_id() -> None:
         .root[0]
         .action_id
         == action_id
+    )
+
+
+@pytest.mark.unit
+def test_interface_action_kinds_lists_every_action_kind() -> None:
+    assert INTERFACE_ACTION_KINDS == (
+        "openStartForm",
+        "openRecord",
+        "triggerAutomation",
     )
