@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent reads and update responses now include `eventParams.kindOfSla`, preserving the SLA trigger type when a behavior is read and sent back in an update.
+
 ## [0.5.5-beta.1] - 2026-10-26
 
 ### Added
