@@ -378,6 +378,11 @@ class UpdatePipeInput(GraphQLInput):
         default=None,
         description="A unique identifier for the client performing the mutation.",
     )
+    anyone_can_create_card: bool | None = Field(
+        default=None,
+        description="Whether all organization members can create cards in the pipe",
+        deprecated="This permission is deprecated and will be removed soon. \\ The form permissions should be used instead.",
+    )
     expiration_time_by_unit: int | None = Field(
         default=None, description="The pipe's SLA unit"
     )

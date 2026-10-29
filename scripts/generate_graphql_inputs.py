@@ -96,10 +96,12 @@ query {
       name
       description
       enumValues { name }
-      inputFields {
+      inputFields(includeDeprecated: true) {
         name
         description
         defaultValue
+        isDeprecated
+        deprecationReason
         type { kind name ofType { kind name ofType { kind name
           ofType { kind name ofType { kind name } } } } }
       }
@@ -154,6 +156,8 @@ def build_snapshot(schema_types: list[dict[str, Any]]) -> dict[str, Any]:
                 "type": _type_ref(f["type"]),
                 "defaultValue": f["defaultValue"],
                 "description": f["description"],
+                "isDeprecated": f["isDeprecated"],
+                "deprecationReason": f["deprecationReason"],
             }
             for f in node["inputFields"]
         ]
@@ -417,6 +421,11 @@ def render(snapshot: dict[str, Any]) -> tuple[str, list[str]]:
             )
             if note:
                 arguments.append(f"description={json.dumps(note)}")
+            if field["isDeprecated"]:
+                reason = clean_description(field["deprecationReason"])
+                arguments.append(
+                    f"deprecated={json.dumps(reason) if reason else 'True'}"
+                )
             if arguments:
                 out.append(
                     f"    {attribute}: {annotation} = Field({', '.join(arguments)})"

@@ -30,6 +30,8 @@ uv run python scripts/generate_graphql_inputs.py check
 
 `check` catches a hand-edit of a generated file, or a snapshot committed without regenerating. It cannot see the API itself move, because CI has no Pipefy credentials — that is `test_input_types_snapshot_matches_live`, which is marked `integration`.
 
+The snapshot includes deprecated input fields and their deprecation reasons. Generated models accept these fields and mark them with `Field(deprecated=...)`. This preserves API compatibility while exposing deprecation metadata to callers.
+
 To migrate another `**attrs` method, add its input type to `ROOT_INPUT_TYPES` in the script and regenerate; the transitive closure is resolved from there.
 
 ## Development

@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from graphql import build_schema, graphql_sync
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _REPO_ROOT / "scripts" / "generate_graphql_inputs.py"
@@ -133,7 +134,12 @@ def _schema_type(name, kind, fields=None, enum_values=None):
         "kind": kind,
         "description": None,
         "enumValues": [{"name": v} for v in (enum_values or [])] or None,
-        "inputFields": fields,
+        "inputFields": [
+            {"isDeprecated": False, "deprecationReason": None, **field}
+            for field in fields
+        ]
+        if fields is not None
+        else None,
     }
 
 
@@ -230,3 +236,68 @@ def test_check_reports_a_hand_edit(tmp_path, monkeypatch):
     stale.write_text("# someone edited this by hand\n")
     monkeypatch.setattr(_gen, "GENERATED_PATH", stale)
     assert _gen.command_check() == 1
+
+
+@pytest.mark.parametrize("reason", ['Use "enabled" instead.', "No longer supported"])
+def test_deprecated_input_fields_survive_introspection_and_generation(
+    monkeypatch, reason
+):
+    monkeypatch.setattr(_gen, "ROOT_INPUT_TYPES", ("RootInput",))
+    schema = build_schema(
+        "type Query { ready: Boolean }\n"
+        "input RootInput {\n"
+        "  id: ID!\n"
+        "  enabled: Boolean\n"
+        f"  legacy: Boolean @deprecated(reason: {json.dumps(reason)})\n"
+        "}"
+    )
+    result = graphql_sync(schema, _gen.INTROSPECTION_QUERY)
+    assert result.errors is None
+    snapshot = _gen.build_snapshot(result.data["__schema"]["types"])
+    fields = {
+        field["name"]: field for field in snapshot["inputs"]["RootInput"]["fields"]
+    }
+    assert "legacy" in fields
+    assert fields["legacy"]["isDeprecated"] is True
+    assert fields["legacy"]["deprecationReason"] == reason
+    assert fields["enabled"]["isDeprecated"] is False
+    assert fields["enabled"]["deprecationReason"] is None
+
+    source, _ = _gen.render(snapshot)
+    namespace = {}
+    exec(source, namespace)
+    model = namespace["RootInput"]
+    model.model_rebuild(_types_namespace=namespace)
+    assert model(id="1", legacy=True).to_graphql_input() == {"id": "1", "legacy": True}
+    assert model(id="1").to_graphql_input() == {"id": "1"}
+    assert model.model_fields["legacy"].deprecated == (reason or True)
+    properties = model.model_json_schema()["properties"]
+    assert properties["legacy"]["deprecated"] is True
+    assert "deprecated" not in properties["enabled"]
+
+
+def test_generated_deprecated_field_without_reason_is_marked():
+    snapshot = {
+        "enums": {},
+        "inputs": {
+            "RootInput": {
+                "description": None,
+                "fields": [
+                    {
+                        "name": "legacy",
+                        "type": "Boolean",
+                        "description": None,
+                        "isDeprecated": True,
+                        "deprecationReason": None,
+                    }
+                ],
+            },
+        },
+    }
+    source, _ = _gen.render(snapshot)
+    namespace = {}
+    exec(source, namespace)
+    model = namespace["RootInput"]
+    model.model_rebuild(_types_namespace=namespace)
+    assert model(legacy=True).to_graphql_input() == {"legacy": True}
+    assert model.model_json_schema()["properties"]["legacy"]["deprecated"] is True

@@ -169,3 +169,17 @@ class TestLegacyConditionShapes:
             {"actions": [{"phaseFieldId": "1", "actionId": "hidden"}]}
         )
         assert repaired["actions"][0]["actionId"] == "hide"
+
+
+def test_deprecated_input_field_remains_serializable():
+    model = UpdatePipeInput(id=EXAMPLE_PIPE_ID, anyone_can_create_card=True)
+    assert model.to_graphql_input() == {
+        "id": EXAMPLE_PIPE_ID,
+        "anyone_can_create_card": True,
+    }
+    assert (
+        UpdatePipeInput.model_json_schema()["properties"]["anyone_can_create_card"][
+            "deprecated"
+        ]
+        is True
+    )
