@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
@@ -15,7 +15,7 @@ from pydantic import (
     model_validator,
 )
 
-from pipefy_sdk.models.validators import NonBlankStr
+from pipefy_sdk.models.validators import NonBlankStr, PipefyId
 
 PortalVisibility = Literal["internal", "private", "public"]
 
@@ -416,13 +416,6 @@ MAX_CUSTOM_CODE_ACTIONS = 50
 _ACTION_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
 
-def _automation_id_as_str(value: object) -> object:
-    """Take a numeric automation id as the string the API stores."""
-    return (
-        str(value) if isinstance(value, int) and not isinstance(value, bool) else value
-    )
-
-
 class _InterfaceAction(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -470,9 +463,7 @@ class TriggerAutomationAction(_InterfaceAction):
 
     kind: Literal["triggerAutomation"]
     source_id: NonBlankStr = Field(alias="sourceId")
-    automation_ids: list[
-        Annotated[NonBlankStr, BeforeValidator(_automation_id_as_str)]
-    ] = Field(alias="automationIds", min_length=1)
+    automation_ids: list[PipefyId] = Field(alias="automationIds", min_length=1)
     label: str | None = None
 
 
@@ -481,7 +472,10 @@ InterfaceAction = Annotated[
     Field(discriminator="kind"),
 ]
 
-INTERFACE_ACTION_KINDS = ("openStartForm", "openRecord", "triggerAutomation")
+INTERFACE_ACTION_KINDS: tuple[str, ...] = tuple(
+    get_args(action.model_fields["kind"].annotation)[0]
+    for action in (OpenStartFormAction, OpenRecordAction, TriggerAutomationAction)
+)
 
 
 class InterfaceActions(RootModel[list[InterfaceAction]]):

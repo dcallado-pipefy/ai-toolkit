@@ -434,25 +434,6 @@ def _stored_custom_code_element(
     return element
 
 
-def _stored_data_source_inputs(element: dict[str, Any]) -> list[dict[str, Any]]:
-    """Map a read element's sources to ``DataSourceInput`` objects, unchanged.
-
-    A read returns ``filters`` parsed and adds ``repoName`` and ``repoType``, which
-    the input does not take.
-    """
-    inputs: list[dict[str, Any]] = []
-    for source in element.get("dataSources") or []:
-        entry: dict[str, Any] = {
-            key: source[key]
-            for key in ("id", "name", "repoId", "fieldKeys")
-            if source.get(key) is not None
-        }
-        if source.get("filters") is not None:
-            entry["filters"] = _filters_json_scalar(source["filters"])
-        inputs.append(entry)
-    return inputs
-
-
 def _unknown_action_references(
     actions: InterfaceActions, element: dict[str, Any]
 ) -> list[str]:
@@ -936,7 +917,9 @@ class PortalService:
                         }
                     ),
                     "editable": sent_editable,
-                    "data_sources": _stored_data_source_inputs(element),
+                    "data_sources": _normalize_portal_data_sources(
+                        element.get("dataSources") or []
+                    ),
                 }
             },
         )
