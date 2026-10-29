@@ -1,10 +1,11 @@
 import json
 from datetime import timedelta
 from random import randint
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, Mock
 
+import jsonschema
 import pytest
 from _mcp_compat import (
     create_connected_server_and_client_session as create_client_session,
@@ -16,7 +17,13 @@ from mcp.types import (
     ElicitRequestParams,
     ElicitResult,
 )
-from pipefy_sdk import PipefyClient, PipefyGraphQLError
+from pipefy_sdk import (
+    PipefyClient,
+    PipefyGraphQLError,
+    PipefyRequestTimeoutError,
+    RecordFilter,
+)
+from pydantic import TypeAdapter, ValidationError
 
 from pipefy_mcp.auth import RequestScopedIdentity
 from pipefy_mcp.core.runtime import McpRuntime
@@ -26,8 +33,12 @@ from pipefy_mcp.tools.pipe_tool_helpers import (
     FIND_CARDS_EMPTY_MESSAGE,
     DeleteCardErrorPayload,
 )
-from pipefy_mcp.tools.pipe_tools import FIND_CARDS_RESPONSE_KEY, PipeTools
-from tools.conftest import build_tool_test_server
+from pipefy_mcp.tools.pipe_tools import (
+    _RECORD_FILTER_ARG_SCHEMA,
+    FIND_CARDS_RESPONSE_KEY,
+    PipeTools,
+)
+from tools.conftest import assert_invalid_arguments_envelope, build_tool_test_server
 from tools.destructive_confirm_test_support import confirm_after_preview
 
 
@@ -80,6 +91,9 @@ def mock_pipefy_client():
     )
     client.update_card = AsyncMock()
     client.get_pipe_members = AsyncMock()
+    client.fill_card_phase_fields = AsyncMock(
+        side_effect=MethodType(PipefyClient.fill_card_phase_fields, client)
+    )
 
     return client
 
@@ -1464,6 +1478,216 @@ class TestGetCardsTool:
         )
 
 
+_RECORDS_FIELD_UUID = "00000000-0000-4000-8000-0000000000aa"
+
+
+def _records_response():
+    return {
+        "records": {
+            "totalCount": 1,
+            "pageInfo": {"hasNextPage": False, "endCursor": "c1=="},
+            "edges": [{"node": {"id": "1"}}],
+        }
+    }
+
+
+@pytest.mark.anyio
+class TestGetRecordsTool:
+    async def test_get_records_forwards_every_argument_to_client(
+        self, client_session, mock_pipefy_client, pipe_id
+    ):
+        mock_pipefy_client.get_records = AsyncMock(return_value=_records_response())
+        where = {
+            "and": [
+                {"attribute": "ASSIGNEES", "in": ["900000001"]},
+                {
+                    "attribute": "FINISHED_AT",
+                    "between": {
+                        "min": "2026-01-01T00:00:00-03:00",
+                        "max": "2026-01-31T23:59:59-03:00",
+                    },
+                },
+            ]
+        }
+        order_by = [{"attribute": "CREATED_AT", "direction": "DESC"}]
+
+        async with client_session as session:
+            result = await session.call_tool(
+                "get_records",
+                {
+                    "pipe_id": pipe_id,
+                    "where": where,
+                    "search_term": "acme",
+                    "phase_id": 900000201,
+                    "order_by": order_by,
+                    "include_fields": True,
+                    "first": 20,
+                    "after": "c0==",
+                },
+            )
+
+        assert result.is_error is False
+        mock_pipefy_client.get_records.assert_called_once_with(
+            str(pipe_id),
+            where,
+            "acme",
+            "900000201",
+            order_by,
+            True,
+            first=20,
+            after="c0==",
+        )
+
+    async def test_get_records_first_above_fifty_returns_invalid_arguments(
+        self,
+        client_session,
+        mock_pipefy_client,
+        pipe_id,
+        extract_payload,
+        envelope_flag,
+    ):
+        mock_pipefy_client.get_records = AsyncMock(return_value=_records_response())
+        async with client_session as session:
+            result = await session.call_tool(
+                "get_records", {"pipe_id": pipe_id, "first": 51}
+            )
+        payload = extract_payload(result)
+        assert payload["success"] is False
+        assert payload["error"]["code"] == "INVALID_ARGUMENTS"
+        assert payload["error"]["details"]["max"] == 50
+        mock_pipefy_client.get_records.assert_not_called()
+
+    async def test_get_records_field_slug_returns_invalid_arguments(
+        self, client_session, mock_pipefy_client, pipe_id, extract_payload
+    ):
+        mock_pipefy_client.get_records = AsyncMock(
+            side_effect=ValueError(
+                "field must be the custom field uuid (from get_phase_fields), "
+                "got 'total_value'"
+            )
+        )
+        async with client_session as session:
+            result = await session.call_tool(
+                "get_records",
+                {"pipe_id": pipe_id, "where": {"field": "total_value", "eq": "x"}},
+            )
+        payload = extract_payload(result)
+        assert payload["success"] is False
+        assert payload["error"]["code"] == "INVALID_ARGUMENTS"
+        assert "uuid" in tool_error_message(payload)
+
+    @pytest.mark.parametrize(
+        "where",
+        [
+            {"attribute": "TITLE", "bogus_op": "x"},
+            {"AND": [{"attribute": "TITLE", "eq": "a"}]},
+        ],
+    )
+    async def test_get_records_unknown_filter_key_returns_invalid_arguments(
+        self, client_session, mock_pipefy_client, pipe_id, where
+    ):
+        mock_pipefy_client.get_records = AsyncMock(return_value=_records_response())
+        async with client_session as session:
+            result = await session.call_tool(
+                "get_records", {"pipe_id": pipe_id, "where": where}
+            )
+        assert_invalid_arguments_envelope(result)
+        mock_pipefy_client.get_records.assert_not_called()
+
+    async def test_get_records_publishes_a_flat_filter_schema(self, client_session):
+        async with client_session as session:
+            tools = {tool.name: tool for tool in (await session.list_tools()).tools}
+        schema = tools["get_records"].input_schema
+        where = next(
+            s for s in schema["properties"]["where"]["anyOf"] if s.get("properties")
+        )
+
+        assert "RecordFilter" not in json.dumps(schema)
+        assert where["additionalProperties"] is False
+        assert len(where["properties"]["attribute"]["enum"]) == 13
+        assert {"and", "or", "field", "eq", "in", "between", "ilike"} <= where[
+            "properties"
+        ].keys()
+        assert len(json.dumps(where)) < 1000
+
+    async def test_get_records_flat_schema_still_validates_nested_keys(
+        self, client_session, mock_pipefy_client, pipe_id
+    ):
+        mock_pipefy_client.get_records = AsyncMock(return_value=_records_response())
+        async with client_session as session:
+            result = await session.call_tool(
+                "get_records",
+                {
+                    "pipe_id": pipe_id,
+                    "where": {"and": [{"attribute": "TITLE", "eqq": 1}]},
+                },
+            )
+        assert_invalid_arguments_envelope(result)
+        mock_pipefy_client.get_records.assert_not_called()
+
+    async def test_get_records_permission_denied_says_pipe_is_not_visible(
+        self, client_session, mock_pipefy_client, pipe_id, extract_payload
+    ):
+        mock_pipefy_client.get_records = AsyncMock(
+            side_effect=PipefyGraphQLError(
+                [
+                    {
+                        "message": "Permission denied",
+                        "extensions": {"code": "PERMISSION_DENIED"},
+                    }
+                ]
+            )
+        )
+        async with client_session as session:
+            result = await session.call_tool("get_records", {"pipe_id": pipe_id})
+        payload = extract_payload(result)
+        assert payload["success"] is False
+        assert payload["error"]["code"] == "PERMISSION_DENIED"
+        message = tool_error_message(payload)
+        assert f"Cannot access pipe (ID: {pipe_id})" in message
+        assert message.isascii()
+
+    @pytest.mark.parametrize("raw", [{"records": None}, {}])
+    async def test_get_records_missing_records_payload_still_returns_an_envelope(
+        self,
+        client_session,
+        mock_pipefy_client,
+        pipe_id,
+        extract_payload,
+        unified_envelope,
+        raw,
+    ):
+        mock_pipefy_client.get_records = AsyncMock(return_value=raw)
+        async with client_session as session:
+            result = await session.call_tool(
+                "get_records", {"pipe_id": pipe_id, "first": 10}
+            )
+        payload = extract_payload(result)
+        assert payload["success"] is True
+        assert payload["data"] == raw
+
+    async def test_get_records_first_emits_pagination(
+        self,
+        client_session,
+        mock_pipefy_client,
+        pipe_id,
+        extract_payload,
+        unified_envelope,
+    ):
+        mock_pipefy_client.get_records = AsyncMock(return_value=_records_response())
+        async with client_session as session:
+            result = await session.call_tool(
+                "get_records", {"pipe_id": pipe_id, "first": 10}
+            )
+        payload = extract_payload(result)
+        assert payload["pagination"] == {
+            "has_more": False,
+            "end_cursor": "c1==",
+            "page_size": 10,
+        }
+        assert payload["data"] == _records_response()
+
+
 @pytest.mark.anyio
 class TestFindCardsTool:
     async def test_find_cards_forwards_params_to_client(
@@ -1919,7 +2143,7 @@ class TestFillCardPhaseFieldsTool:
 
             assert result.is_error is False, "Unexpected tool error"
             mock_pipefy_client.update_card.assert_called_once_with(
-                card_id=str(card_id),
+                str(card_id),
                 field_updates=[{"field_id": "status", "value": "completed"}],
             )
 
@@ -1969,7 +2193,7 @@ class TestFillCardPhaseFieldsTool:
 
             assert result.is_error is False, "Unexpected tool error"
             mock_pipefy_client.update_card.assert_called_once_with(
-                card_id=str(card_id),
+                str(card_id),
                 field_updates=[{"field_id": "status", "value": "completed"}],
             )
 
@@ -2001,6 +2225,7 @@ class TestFillCardPhaseFieldsTool:
             mock_pipefy_client.update_card.assert_not_called()
             response = extract_payload(result)
             assert response.get("message") == "No fields to update."
+            assert response.get("skipped_field_ids") == []
 
     async def test_permission_denied(
         self,
@@ -2027,7 +2252,7 @@ class TestFillCardPhaseFieldsTool:
 
             assert result.is_error is True, "Expected tool error for permission denied"
             mock_pipefy_client.get_phase_fields.assert_called_once_with(
-                str(phase_id), False
+                str(phase_id), required_only=False
             )
             mock_pipefy_client.update_card.assert_not_called()
 
@@ -2279,6 +2504,40 @@ class TestDeleteCardTool:
                 ),
             )
             assert payload == expected_payload
+
+    async def test_request_timeout_surfaces_timeout_message(
+        self,
+        client_session,
+        mock_pipefy_client,
+    ) -> None:
+        """A timed-out delete reports the timeout, not the generic retry message.
+
+        A timeout carries no GraphQL error code, so before the fix the write path
+        folded it into "Please try again or contact support.", which invites a retry
+        of a delete the API may already have committed. The reply now names the
+        timeout and warns the mutation may have applied.
+        """
+        mock_pipefy_client.get_card.return_value = {
+            "card": {
+                "id": "12345",
+                "title": "Test Card",
+                "pipe": {"name": "Test Pipe"},
+            }
+        }
+        mock_pipefy_client.delete_card.side_effect = PipefyRequestTimeoutError(30)
+
+        async with client_session as session:
+            payload = await confirm_after_preview(
+                session, "delete_card", {"card_id": 12345}
+            )
+
+            mock_pipefy_client.delete_card.assert_called_once_with("12345")
+
+            message = tool_error_message(payload)
+            assert payload["success"] is False
+            assert "timed out" in message.lower()
+            assert "30" in message
+            assert "try again" not in message.lower()
 
     async def test_deletion_fails_with_success_false(
         self,
@@ -2802,11 +3061,254 @@ class TestSkipElicitation:
                 },
             )
         assert result.is_error is False
-        # readonly should be filtered out
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
         mock_pipefy_client.update_card.assert_called_once_with(
-            card_id="99",
+            "99",
             field_updates=[{"field_id": "status", "value": "done"}],
         )
+
+    async def test_fill_phase_skip_path_awaits_get_phase_fields_once(
+        self, client_session, mock_pipefy_client, extract_payload
+    ):
+        """ADR-002: skip path awaits get_phase_fields once, inside the client."""
+        mock_pipefy_client.get_phase_fields = AsyncMock(
+            return_value={
+                "phase_id": "100",
+                "phase_name": "Review",
+                "fields": [
+                    {
+                        "id": "status",
+                        "label": "Status",
+                        "type": "select",
+                        "editable": True,
+                    },
+                ],
+            }
+        )
+        mock_pipefy_client.update_card = AsyncMock(
+            return_value={"updateFieldsValues": {"success": True}}
+        )
+
+        async with client_session as session:
+            result = await session.call_tool(
+                "fill_card_phase_fields",
+                {
+                    "card_id": "99",
+                    "phase_id": "100",
+                    "fields": {"status": "done"},
+                    "skip_elicitation": True,
+                },
+            )
+
+        assert result.is_error is False
+        mock_pipefy_client.fill_card_phase_fields.assert_awaited_once()
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        payload = extract_payload(result)
+        assert "skipped_field_ids" not in payload
+
+    async def test_fill_phase_skip_elicitation_no_editable_fields_does_not_write(
+        self, client_session, mock_pipefy_client, extract_payload
+    ):
+        """ADR-002: skip_elicitation on a phase with no editable fields does not write."""
+        mock_pipefy_client.get_phase_fields = AsyncMock(
+            return_value={
+                "phase_id": "100",
+                "phase_name": "Review",
+                "fields": [
+                    {
+                        "id": "readonly",
+                        "label": "RO",
+                        "type": "short_text",
+                        "editable": False,
+                    },
+                ],
+            }
+        )
+        mock_pipefy_client.update_card = AsyncMock()
+
+        async with client_session as session:
+            result = await session.call_tool(
+                "fill_card_phase_fields",
+                {
+                    "card_id": "99",
+                    "phase_id": "100",
+                    "fields": {"readonly": "nope", "bogus": "x"},
+                    "skip_elicitation": True,
+                },
+            )
+
+        assert result.is_error is False
+        mock_pipefy_client.fill_card_phase_fields.assert_awaited_once()
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        mock_pipefy_client.update_card.assert_not_called()
+        payload = extract_payload(result)
+        assert payload["skipped_field_ids"] == ["readonly", "bogus"]
+
+    async def test_fill_phase_skip_elicitation_malformed_returns_tool_error(
+        self, client_session, mock_pipefy_client, extract_payload
+    ):
+        from pipefy_sdk.models.field_definition import MalformedFieldDefinitionError
+
+        message = (
+            "Cannot return phase fields: 1 field definition(s) from Pipefy are "
+            "missing required 'id' or 'type'. The pipe configuration may be "
+            "incomplete or unsupported."
+        )
+        mock_pipefy_client.fill_card_phase_fields = AsyncMock(
+            side_effect=MalformedFieldDefinitionError(message)
+        )
+
+        async with client_session as session:
+            result = await session.call_tool(
+                "fill_card_phase_fields",
+                {
+                    "card_id": "99",
+                    "phase_id": "100",
+                    "fields": {"status": "done"},
+                    "skip_elicitation": True,
+                },
+            )
+
+        payload = extract_payload(result)
+        assert payload == tool_error(message)
+        mock_pipefy_client.fill_card_phase_fields.assert_awaited_once()
+        mock_pipefy_client.get_phase_fields.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "client_session",
+        [elicitation_callback_for(action="accept", content={"readonly": "nope"})],
+        indirect=True,
+    )
+    async def test_fill_phase_elicit_no_editable_fields_does_not_write(
+        self, client_session, mock_pipefy_client, extract_payload
+    ):
+        """ADR-002: elicitation-capable session, no editable fields, does not write."""
+        mock_pipefy_client.get_phase_fields = AsyncMock(
+            return_value={
+                "phase_id": "100",
+                "phase_name": "Review",
+                "fields": [
+                    {
+                        "id": "readonly",
+                        "label": "RO",
+                        "type": "short_text",
+                        "editable": False,
+                    },
+                ],
+            }
+        )
+        mock_pipefy_client.update_card = AsyncMock()
+
+        async with client_session as session:
+            result = await session.call_tool(
+                "fill_card_phase_fields",
+                {
+                    "card_id": "99",
+                    "phase_id": "100",
+                    "fields": {"readonly": "nope", "bogus": "x"},
+                },
+            )
+
+        assert result.is_error is False
+        mock_pipefy_client.update_card.assert_not_called()
+        mock_pipefy_client.fill_card_phase_fields.assert_not_awaited()
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        payload = extract_payload(result)
+        assert payload["success"] is True
+        assert payload["phase_id"] == "100"
+        assert payload["phase_name"] == "Review"
+        assert payload["skipped_field_ids"] == ["readonly", "bogus"]
+
+    @pytest.mark.parametrize(
+        "client_session",
+        [elicitation_callback_for(action="accept", content={"status": "done"})],
+        indirect=True,
+    )
+    async def test_fill_phase_elicit_required_only_with_no_required_fields_does_not_write(
+        self, client_session, mock_pipefy_client, extract_payload
+    ):
+        mock_pipefy_client.get_phase_fields = AsyncMock(
+            return_value={
+                "phase_id": "100",
+                "phase_name": "Review",
+                "fields": [],
+                "message": "This phase has no required fields.",
+            }
+        )
+        mock_pipefy_client.update_card = AsyncMock()
+
+        async with client_session as session:
+            result = await session.call_tool(
+                "fill_card_phase_fields",
+                {
+                    "card_id": "99",
+                    "phase_id": "100",
+                    "fields": {"status": "done"},
+                    "required_fields_only": True,
+                },
+            )
+
+        assert result.is_error is False
+        mock_pipefy_client.fill_card_phase_fields.assert_not_awaited()
+        mock_pipefy_client.update_card.assert_not_called()
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        payload = extract_payload(result)
+        assert payload == {
+            "success": True,
+            "message": "This phase has no required fields. Nothing was updated.",
+            "phase_id": "100",
+            "phase_name": "Review",
+            "skipped_field_ids": ["status"],
+        }
+
+    @pytest.mark.parametrize(
+        "client_session",
+        [elicitation_callback_for(action="accept", content={"readonly": "nope"})],
+        indirect=True,
+    )
+    async def test_fill_phase_elicit_required_only_non_editable_does_not_write(
+        self, client_session, mock_pipefy_client, extract_payload
+    ):
+        mock_pipefy_client.get_phase_fields = AsyncMock(
+            return_value={
+                "phase_id": "100",
+                "phase_name": "Review",
+                "fields": [
+                    {
+                        "id": "readonly",
+                        "label": "RO",
+                        "type": "short_text",
+                        "required": True,
+                        "editable": False,
+                    },
+                ],
+            }
+        )
+        mock_pipefy_client.update_card = AsyncMock()
+
+        async with client_session as session:
+            result = await session.call_tool(
+                "fill_card_phase_fields",
+                {
+                    "card_id": "99",
+                    "phase_id": "100",
+                    "fields": {"readonly": "nope"},
+                    "required_fields_only": True,
+                },
+            )
+
+        assert result.is_error is False
+        mock_pipefy_client.fill_card_phase_fields.assert_not_awaited()
+        mock_pipefy_client.update_card.assert_not_called()
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        payload = extract_payload(result)
+        assert payload == {
+            "success": True,
+            "message": "Phase 'Review' has no editable fields; nothing was updated.",
+            "phase_id": "100",
+            "phase_name": "Review",
+            "skipped_field_ids": ["readonly"],
+        }
 
     @pytest.mark.parametrize(
         "client_session",
@@ -2976,8 +3478,10 @@ class TestElicitationWithoutABackChannel:
             )
 
         assert result.is_error is False
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        mock_pipefy_client.fill_card_phase_fields.assert_awaited_once()
         mock_pipefy_client.update_card.assert_called_once_with(
-            card_id="99",
+            "99",
             field_updates=[{"field_id": "f1", "value": "from-arguments"}],
         )
 
@@ -3047,11 +3551,14 @@ class TestElicitationWithoutABackChannel:
             )
 
         assert result.is_error is False
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        mock_pipefy_client.fill_card_phase_fields.assert_awaited_once()
         mock_pipefy_client.update_card.assert_not_called()
         payload = extract_payload(result)
         assert payload["message"] != "No fields to update."
         assert "nothing was updated" in payload["message"]
         assert "1 editable field(s)" in payload["message"]
+        assert payload["skipped_field_ids"] == []
 
     async def test_elicit_raising_no_back_channel_is_absorbed(
         self, mock_pipefy_client, pipe_id
@@ -3108,6 +3615,128 @@ class TestElicitationWithoutABackChannel:
             str(pipe_id), {"f1": "from-arguments"}
         )
         assert result["createCard"]["card"]["id"] == "14"
+
+    async def test_fill_card_phase_fields_channel_closed_includes_skipped_field_ids(
+        self, mock_pipefy_client
+    ):
+        """Channel closed after the phase read: filter in-memory, no second read."""
+        mock_pipefy_client.get_phase_fields = AsyncMock(
+            return_value={
+                "phase_id": "100",
+                "phase_name": "Review",
+                "fields": [
+                    {
+                        "id": "f1",
+                        "label": "F1",
+                        "type": "short_text",
+                        "required": False,
+                        "editable": True,
+                    },
+                    {
+                        "id": "readonly",
+                        "label": "RO",
+                        "type": "short_text",
+                        "editable": False,
+                    },
+                ],
+            }
+        )
+        mock_pipefy_client.update_card = AsyncMock(
+            return_value={"updateFieldsValues": {"success": True}}
+        )
+
+        mcp = build_tool_test_server(
+            "Pipefy MCP Test Server", PipeTools.register, mock_pipefy_client
+        )
+        runtime = McpRuntime(settings, RequestScopedIdentity())
+        runtime.session_for_request = lambda _req: mock_pipefy_client
+
+        ctx = MagicMock()
+        ctx.debug = AsyncMock()
+        ctx.elicit = AsyncMock(side_effect=NoBackChannelError("elicitation/fill"))
+        ctx.session = SimpleNamespace(
+            client_params=SimpleNamespace(
+                capabilities=SimpleNamespace(elicitation=True)
+            ),
+            can_send_request=True,
+        )
+        ctx.request_context = SimpleNamespace(lifespan_context=runtime, request=None)
+
+        result = await mcp._tool_manager.call_tool(
+            "fill_card_phase_fields",
+            {
+                "card_id": "99",
+                "phase_id": "100",
+                "fields": {"f1": "from-arguments", "readonly": "nope"},
+            },
+            context=ctx,
+            convert_result=False,
+        )
+
+        ctx.elicit.assert_awaited_once()
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        mock_pipefy_client.fill_card_phase_fields.assert_not_awaited()
+        mock_pipefy_client.update_card.assert_called_once_with(
+            card_id="99",
+            field_updates=[{"field_id": "f1", "value": "from-arguments"}],
+        )
+        assert result["skipped_field_ids"] == ["readonly"]
+
+    async def test_fill_card_phase_fields_channel_closed_no_write_keeps_skipped_ids(
+        self, mock_pipefy_client
+    ):
+        """Channel closed after the phase read: no-write envelope keeps skipped keys."""
+        mock_pipefy_client.get_phase_fields = AsyncMock(
+            return_value={
+                "phase_id": "100",
+                "phase_name": "Review",
+                "fields": [
+                    {
+                        "id": "f1",
+                        "label": "F1",
+                        "type": "short_text",
+                        "required": False,
+                        "editable": True,
+                    },
+                ],
+            }
+        )
+        mock_pipefy_client.update_card = AsyncMock()
+
+        mcp = build_tool_test_server(
+            "Pipefy MCP Test Server", PipeTools.register, mock_pipefy_client
+        )
+        runtime = McpRuntime(settings, RequestScopedIdentity())
+        runtime.session_for_request = lambda _req: mock_pipefy_client
+
+        ctx = MagicMock()
+        ctx.debug = AsyncMock()
+        ctx.elicit = AsyncMock(side_effect=NoBackChannelError("elicitation/fill"))
+        ctx.session = SimpleNamespace(
+            client_params=SimpleNamespace(
+                capabilities=SimpleNamespace(elicitation=True)
+            ),
+            can_send_request=True,
+        )
+        ctx.request_context = SimpleNamespace(lifespan_context=runtime, request=None)
+
+        result = await mcp._tool_manager.call_tool(
+            "fill_card_phase_fields",
+            {
+                "card_id": "99",
+                "phase_id": "100",
+                "fields": {"readonly": "nope"},
+            },
+            context=ctx,
+            convert_result=False,
+        )
+
+        ctx.elicit.assert_awaited_once()
+        mock_pipefy_client.get_phase_fields.assert_awaited_once()
+        mock_pipefy_client.fill_card_phase_fields.assert_not_awaited()
+        mock_pipefy_client.update_card.assert_not_called()
+        assert result["success"] is True
+        assert result["skipped_field_ids"] == ["readonly"]
 
 
 # =============================================================================
@@ -3180,3 +3809,47 @@ async def test_comment_and_card_mutations_emit_unstructured_content(
     # The tool body returns a plain success dict; structured_output=False
     # means no structuredContent is emitted on the MCP protocol side.
     assert result.structured_content is None
+
+
+_FILTER_UUID = "00000000-0000-4000-8000-0000000000aa"
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        {"attribute": "TITLE", "ilike": "acme"},
+        {"field": _FILTER_UUID, "eq": None},
+        {"attribute": "ASSIGNEES", "in": ["900000001", 2]},
+        {
+            "attribute": "FINISHED_AT",
+            "between": {"min": "2026-01-01", "max": "2026-01-31"},
+        },
+        {
+            "and": [
+                {"attribute": "TITLE", "eq": "a"},
+                {"or": [{"field": _FILTER_UUID, "gt": 1.5}]},
+            ]
+        },
+        {"attribute": "EMAIL_READ", "eq": True},
+    ],
+)
+def test_get_records_schema_accepts_what_the_model_accepts(where):
+    TypeAdapter(RecordFilter).validate_python(where)
+    jsonschema.validate(where, _RECORD_FILTER_ARG_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "where",
+    [
+        {"attribute": "TITLE", "eqq": 1},
+        {"attribute": "created_at", "eq": 1},
+        {"attribute": "FINISHED_AT", "between": {"min": "2026-01-01"}},
+        {"attribute": "FINISHED_AT", "between": {"min": 1, "max": 2, "x": 3}},
+        {"and": "x"},
+    ],
+)
+def test_get_records_schema_rejects_what_the_model_rejects(where):
+    with pytest.raises(ValidationError):
+        TypeAdapter(RecordFilter).validate_python(where)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(where, _RECORD_FILTER_ARG_SCHEMA)

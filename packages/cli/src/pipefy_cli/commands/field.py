@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import typer
-from pipefy_sdk import PipefyClient
+from pipefy_sdk import FIELD_TYPE_IDS, PipefyClient
 from pipefy_sdk.graphql_inputs import (
     CreatePhaseFieldInput,
     UpdatePhaseFieldInput,
@@ -14,11 +14,16 @@ from pipefy_cli.commands._common import (
     confirm_destructive,
     graphql_input_or_bad_parameter,
     parse_json_object,
+    reject_reserved_extra_keys,
     resource_id_argument,
     run_cli_command,
 )
 
 field_app = typer.Typer(help="Phase field operations.", no_args_is_help=True)
+
+
+def _complete_field_type(incomplete: str) -> list[str]:
+    return [t for t in FIELD_TYPE_IDS if t.startswith(incomplete)]
 
 
 @field_app.command("list")
@@ -49,7 +54,11 @@ def field_create(
         ...,
         "--type",
         "-t",
-        help="Pipefy field type (e.g. short_text, number).",
+        help=(
+            f"Field type, a FieldTypeId value: {', '.join(FIELD_TYPE_IDS)}. "
+            "A connector also needs connectedRepoId in --extra."
+        ),
+        autocompletion=_complete_field_type,
     ),
     extra_json: str | None = typer.Option(
         None,
@@ -60,7 +69,10 @@ def field_create(
 ) -> None:
     """Create a field on a phase."""
 
-    extra = parse_json_object(extra_json, "--extra") or {}
+    extra = reject_reserved_extra_keys(
+        parse_json_object(extra_json, "--extra"),
+        reserved=frozenset({"phase_id", "label", "type"}),
+    )
     lab = label.strip()
     ft = field_type.strip()
     if not lab or not ft:

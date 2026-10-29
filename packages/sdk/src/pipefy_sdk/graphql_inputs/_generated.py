@@ -49,7 +49,8 @@ class ConditionExpressionInput(GraphQLInput):
     """
 
     field_address: str | None = Field(
-        default=None, description="The condition field's ID"
+        default=None,
+        description="The field internal_id (or a native card attribute such as title). A field slug is accepted and resolved to internal_id.",
     )
     id: PipefyGraphQLId | None = Field(default=None, description="The condition ID")
     operation: str | None = Field(
@@ -75,7 +76,7 @@ class ConditionInput(GraphQLInput):
     )
     expressions_structure: list[list[PipefyGraphQLId | None] | None] | None = Field(
         default=None,
-        description='Array of arrays with the condition\'s order. Defining groups of "AND" and "OR"',
+        description="The outer array is an OR of groups. Each inner array is an AND. The numbers are each expression's structure_id. An empty structure is always true. Every expression appears in the structure exactly once. Expressions with a blank field_address or operation are dropped. Structure ids with no matching expression are dropped.",
     )
 
 
@@ -158,7 +159,8 @@ class CreatePhaseFieldInput(GraphQLInput):
         default=None, description="Connection Field: The Repo ID"
     )
     custom_validation: str | None = Field(
-        default=None, description="The regex used to validate the field's value"
+        default=None,
+        description="short_text and phase take a regex, attachment takes a comma-separated extension list, and any other type rejects a non-blank value",
     )
     description: str | None = Field(default=None, description="The field description")
     editable: bool | None = Field(
@@ -312,7 +314,8 @@ class UpdatePhaseFieldInput(GraphQLInput):
         description="Connection Field: Whether a child must exist to finish the parent",
     )
     custom_validation: str | None = Field(
-        default=None, description="The regex used to validate the field's value"
+        default=None,
+        description="short_text and phase take a regex, attachment takes a comma-separated extension list, and any other type rejects a non-blank value",
     )
     description: str | None = Field(default=None, description="The field description")
     editable: bool | None = Field(
@@ -325,6 +328,9 @@ class UpdatePhaseFieldInput(GraphQLInput):
     )
     options: list[str | None] | None = Field(
         default=None, description="The field options"
+    )
+    pipeUuid: PipefyGraphQLId | None = Field(
+        default=None, description="The UUID of the pipe the field is in"
     )
     required: bool | None = Field(
         default=None, description="Whether the field is required"
@@ -352,6 +358,10 @@ class UpdatePhaseInput(GraphQLInput):
     )
     description: str | None = Field(default=None, description="The phase description")
     done: bool | None = Field(default=None, description="Whether it's a final phase")
+    jumpTargetIds: list[PipefyGraphQLId] | None = Field(
+        default=None,
+        description="A present list replaces every outgoing transition. An empty list clears them.",
+    )
     lateness_time: int | None = Field(
         default=None, description="The phase's SLA in seconds"
     )

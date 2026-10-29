@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, get_args
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.shared.exceptions import NoBackChannelError
 from mcp.types import ToolAnnotations
 from pipefy_sdk import (
+    RECORDS_MAX_PAGE_SIZE,
     CardSearch,
     CommentInput,
     DeleteCommentInput,
     PipefyId,
+    RecordAttribute,
+    RecordFilter,
+    RecordOrder,
     UpdateCommentInput,
     copy_card_search,
     create_form_model,
@@ -22,8 +26,10 @@ from pipefy_sdk import (
 from pipefy_sdk import (
     filter_fields_by_definitions as _filter_fields_by_definitions,
 )
+from pipefy_sdk import phase_fill_no_write_result as _phase_fill_no_write_result
+from pipefy_sdk import skipped_field_ids as _skipped_field_ids
 from pipefy_sdk.models.form import MalformedFieldDefinitionError
-from pydantic import ValidationError
+from pydantic import ValidationError, WithJsonSchema
 
 from pipefy_mcp.core.tool_error_envelope import (
     is_unified_envelope_enabled,
@@ -38,6 +44,7 @@ from pipefy_mcp.tools.graphql_error_helpers import (
     extract_graphql_correlation_id,
     extract_graphql_error_codes,
     handle_tool_graphql_error,
+    timeout_message_or,
     with_debug_suffix,
 )
 from pipefy_mcp.tools.mcp_capabilities import supports_elicitation
@@ -82,6 +89,38 @@ from pipefy_mcp.tools.validation_helpers import validate_tool_id
 
 # Key for findCards response; used when reading edges and adding empty message.
 FIND_CARDS_RESPONSE_KEY = "findCards"
+
+
+def _record_filter_json_schema() -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    for key in RecordFilter.__annotations__:
+        if key in ("and", "or"):
+            properties[key] = {"type": "array", "items": {"type": "object"}}
+        elif key == "attribute":
+            properties[key] = {"enum": list(get_args(RecordAttribute))}
+        elif key == "field":
+            properties[key] = {"type": "string"}
+        elif key in ("contains", "ncontains", "in", "nin"):
+            properties[key] = {"type": "array"}
+        elif key in ("between", "nbetween"):
+            properties[key] = {
+                "type": "object",
+                "properties": {"min": {}, "max": {}},
+                "required": ["min", "max"],
+                "additionalProperties": False,
+            }
+        else:
+            properties[key] = {}
+    return {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": False,
+    }
+
+
+# The generated schema for the recursive RecordFilter is ~3k characters and the only
+# recursive $ref in the server; publish a flat one. Validation still uses RecordFilter.
+_RECORD_FILTER_ARG_SCHEMA = {"anyOf": [_record_filter_json_schema(), {"type": "null"}]}
 
 
 class PipeTools:
@@ -728,6 +767,101 @@ class PipeTools:
             ),
             meta=REMOTE,
         )
+        async def get_records(
+            ctx: Context,
+            pipe_id: PipefyId,
+            where: Annotated[
+                RecordFilter | None, WithJsonSchema(_RECORD_FILTER_ARG_SCHEMA)
+            ] = None,
+            search_term: str | None = None,
+            phase_id: PipefyId | None = None,
+            order_by: list[RecordOrder] | None = None,
+            include_fields: bool = False,
+            first: int | None = None,
+            after: str | None = None,
+            debug: bool = False,
+        ) -> dict:
+            """List, count and filter the cards of a pipe on the server (the ``records`` query).
+
+            Not for database-table records; use ``find_records`` / ``get_table_records``.
+            For a count, pass ``first=1`` and read ``records.totalCount``.
+
+            Returns ``records.totalCount`` (the whole result, not the page),
+            ``pageInfo`` and ``edges`` in camelCase. ``where`` is a filter node
+            (``attribute`` or ``field`` plus one operator) or ``and``/``or`` lists of
+            nodes. ``field`` (in ``where`` and ``order_by``) must be the custom field
+            uuid from ``get_phase_fields``; for a start-form field, call
+            ``get_phase_fields`` with ``phase_id`` set to ``get_pipe``'s
+            ``startFormPhaseId``. CREATOR takes a user id and CREATOR_EMAIL an email.
+            On ASSIGNEES and LABELS, ``in`` matches any and ``contains`` matches all.
+            ``like`` and ``ilike`` both ignore case and match each word of the value as
+            a substring, in any order; ``%`` and ``_`` are literal characters, not
+            wildcards. Dates are ISO 8601: give date-time attributes such as
+            ``CREATED_AT`` and ``FINISHED_AT`` an offset, but give a ``date`` custom
+            field the bare date (``2026-07-03``), because a non-UTC offset makes ``eq``
+            return 0 and shifts a ``between`` window. Pages hold at most 50 cards; with
+            ``where`` or ``search_term`` paging stops at 10,000 cards.
+
+            To read every page, pass ``pageInfo.endCursor`` back as ``after`` until
+            ``hasNextPage`` is false; never build a cursor.
+
+            Args:
+                pipe_id: The ID of the pipe.
+                where: Filter tree, e.g. ``{"attribute": "ASSIGNEES", "in": ["<user id>"]}``.
+                search_term: Matches title and subtitle fields; to find a card by id,
+                    use ``where={"attribute": "ID", "eq": "<id>"}``.
+                phase_id: Only cards currently in this phase.
+                order_by: List of ``{attribute or field, direction}`` (ASC or DESC); ``field`` is the field uuid.
+                include_fields: If True, include each card's custom fields.
+                first: Cards per page (1-50).
+                after: ``pageInfo.endCursor`` from the previous page, passed back exactly.
+                debug: When True, append GraphQL codes and correlation_id on errors.
+            """
+            client = get_pipefy_client(ctx)
+            if first is not None:
+                first, err = validate_page_size(first, max_size=RECORDS_MAX_PAGE_SIZE)
+                if err is not None:
+                    return err
+
+            try:
+                raw = await client.get_records(
+                    pipe_id,
+                    where,
+                    search_term,
+                    phase_id,
+                    order_by,
+                    include_fields,
+                    first=first,
+                    after=after,
+                )
+            except ValueError as exc:
+                return tool_error(str(exc), code="INVALID_ARGUMENTS")
+            except Exception as exc:  # noqa: BLE001
+                return handle_tool_graphql_error(
+                    exc,
+                    "Get records failed.",
+                    debug=debug,
+                    resource_kind="pipe",
+                    resource_id=pipe_id,
+                )
+            if is_unified_envelope_enabled():
+                pagination = None
+                if first is not None:
+                    pagination = build_pagination_info(
+                        page_info=(raw.get("records") or {}).get("pageInfo"),
+                        page_size=first,
+                    )
+                return tool_success(
+                    data=raw, message="Records retrieved.", pagination=pagination
+                )
+            return raw
+
+        @mcp.tool(
+            annotations=ToolAnnotations(
+                readOnlyHint=True,
+            ),
+            meta=REMOTE,
+        )
         async def find_cards(
             pipe_id: PipefyId,
             field_id: str,
@@ -809,7 +943,8 @@ class PipeTools:
 
             Returns:
                 dict: GraphQL response containing a ``pipe`` object with ``id``, ``name``,
-                ``phases`` (workflow phases; each includes ``cards_count``),
+                ``phases`` (workflow phases in ascending ``index`` order; each
+                includes ``index`` and ``cards_count``),
                 ``labels``, ``start_form_fields``, and related metadata from the API.
             """
             client = get_pipefy_client(ctx)
@@ -1189,6 +1324,8 @@ class PipeTools:
             When ``skip_elicitation`` is True, field values from ``fields`` are
             filtered to editable phase field IDs and sent directly to the API.
             AI agents should set this to True when they already know the values.
+            Keys the phase does not expose as editable are never written; they
+            come back in ``skipped_field_ids``.
 
             When ``skip_elicitation`` is False (default) and the client supports
             elicitation, an interactive form is presented — ``fields`` pre-fills
@@ -1216,24 +1353,13 @@ class PipeTools:
                     ``fields`` directly to the API. Recommended for AI agent workflows.
 
             Returns:
-                dict: GraphQL response with success status and updated card information.
+                A write returns the ``update_card`` response. A no-write envelope
+                carries ``success``, ``message``, ``phase_id``, and ``phase_name``.
+                ``skipped_field_ids`` is present on every no-write envelope when
+                no form was shown (the list may be empty); on a write result only
+                when at least one key was dropped; absent after an accepted form.
             """
             client = get_pipefy_client(ctx)
-            try:
-                phase_fields_result = await client.get_phase_fields(
-                    phase_id, required_fields_only
-                )
-            except MalformedFieldDefinitionError as exc:
-                return tool_error(str(exc))
-            expected_fields = _filter_editable_field_definitions(
-                phase_fields_result.get("fields", [])
-            )
-            phase_name = phase_fields_result.get("phase_name", f"Phase {phase_id}")
-
-            await ctx.debug(f"Expected fields for phase {phase_id}: {expected_fields}")
-            await ctx.debug(f"Provided fields: {fields}")
-
-            field_data = fields or {}
             can_elicit = supports_elicitation(ctx)
             if not can_elicit and not skip_elicitation:
                 # Logged for the same reason the NoBackChannelError absorb in
@@ -1243,58 +1369,81 @@ class PipeTools:
                     "Elicitation unavailable: no interactive form for this "
                     "connection; proceeding with the supplied fields"
                 )
-
-            elicited: dict[str, Any] | None = None
-            if can_elicit and expected_fields and not skip_elicitation:
+            if skip_elicitation or not can_elicit:
                 try:
-                    elicited = await PipeTools._elicit_field_details(
-                        message=f"Filling fields for phase '{phase_name}' (ID: {phase_id})",
-                        prefilled_fields=fields,
-                        expected_fields=expected_fields,
-                        ctx=ctx,
+                    return await client.fill_card_phase_fields(
+                        card_id,
+                        phase_id,
+                        fields,
+                        required_fields_only=required_fields_only,
                     )
                 except MalformedFieldDefinitionError as exc:
                     return tool_error(str(exc))
-                except UserCancelledError:
-                    return tool_error("Phase field update cancelled by user.")
 
+            try:
+                phase_fields_result = await client.get_phase_fields(
+                    phase_id, required_fields_only
+                )
+            except MalformedFieldDefinitionError as exc:
+                return tool_error(str(exc))
+            expected_fields = _filter_editable_field_definitions(
+                phase_fields_result.get("fields", [])
+            )
+            phase_name = phase_fields_result.get("phase_name") or f"Phase {phase_id}"
+            given_fields = fields or {}
+
+            await ctx.debug(f"Expected fields for phase {phase_id}: {expected_fields}")
+            await ctx.debug(f"Provided fields: {fields}")
+
+            if not expected_fields:
+                return _phase_fill_no_write_result(
+                    phase_fields_result,
+                    fields,
+                    phase_id=phase_id,
+                    required_fields_only=required_fields_only,
+                )
+
+            field_data = given_fields
+            elicited: dict[str, Any] | None = None
+            try:
+                elicited = await PipeTools._elicit_field_details(
+                    message=f"Filling fields for phase '{phase_name}' (ID: {phase_id})",
+                    prefilled_fields=fields,
+                    expected_fields=expected_fields,
+                    ctx=ctx,
+                )
+            except MalformedFieldDefinitionError as exc:
+                return tool_error(str(exc))
+            except UserCancelledError:
+                return tool_error("Phase field update cancelled by user.")
+
+            dropped: list[str] = []
             if elicited is not None:
                 field_data = elicited
-            elif expected_fields:
+            else:
                 field_data = _filter_fields_by_definitions(field_data, expected_fields)
+                dropped = _skipped_field_ids(given_fields, field_data)
 
             if not field_data:
-                if expected_fields:
-                    # The phase does have editable fields, so "No fields to
-                    # update." would be false: values were needed and none were
-                    # collected. Reachable when no form could be shown and the
-                    # caller passed no fields, or when every key it passed was
-                    # dropped by the editable-field filter. An agent reading only
-                    # the message must not conclude the card is complete.
-                    message = (
-                        "No field values were collected, so nothing was updated. "
-                        f"Phase '{phase_name}' has {len(expected_fields)} editable "
-                        "field(s); pass 'fields' keyed by the IDs from "
-                        "get_phase_fields(phase_id)."
-                    )
-                else:
-                    message = "No fields to update."
-                return {
-                    "success": True,
-                    "message": message,
-                    "phase_id": phase_id,
-                    "phase_name": phase_name,
-                }
+                return _phase_fill_no_write_result(
+                    phase_fields_result,
+                    fields,
+                    phase_id=phase_id,
+                    required_fields_only=required_fields_only,
+                )
 
             field_updates = [
                 {"field_id": field_id, "value": value}
                 for field_id, value in field_data.items()
             ]
 
-            return await client.update_card(
+            api_response = await client.update_card(
                 card_id=card_id,
                 field_updates=field_updates,
             )
+            if dropped:
+                return {**api_response, "skipped_field_ids": dropped}
+            return api_response
 
         @mcp.tool(
             annotations=ToolAnnotations(
@@ -1394,8 +1543,11 @@ class PipeTools:
             except Exception as exc:  # noqa: BLE001
                 codes = extract_graphql_error_codes(exc)
                 correlation_id = extract_graphql_correlation_id(exc)
-                base = map_delete_card_error_to_message(
-                    card_id=card_id_str, card_title="Unknown", codes=codes
+                base = timeout_message_or(
+                    exc,
+                    map_delete_card_error_to_message(
+                        card_id=card_id_str, card_title="Unknown", codes=codes
+                    ),
                 )
                 return build_delete_card_error_payload(
                     message=with_debug_suffix(
@@ -1440,8 +1592,11 @@ class PipeTools:
             except Exception as exc:  # noqa: BLE001
                 codes = extract_graphql_error_codes(exc)
                 correlation_id = extract_graphql_correlation_id(exc)
-                base = map_delete_card_error_to_message(
-                    card_id=card_id_str, card_title=card_title, codes=codes
+                base = timeout_message_or(
+                    exc,
+                    map_delete_card_error_to_message(
+                        card_id=card_id_str, card_title=card_title, codes=codes
+                    ),
                 )
                 return build_delete_card_error_payload(
                     message=with_debug_suffix(

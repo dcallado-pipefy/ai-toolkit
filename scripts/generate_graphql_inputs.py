@@ -56,7 +56,7 @@ inputs.
 
 # The input objects an SDK method takes directly. Everything they reference is
 # pulled in transitively, so only the roots are listed. Grows one batch at a
-# time as `**attrs` methods are migrated (#652).
+# time as `**attrs` methods are migrated.
 ROOT_INPUT_TYPES: tuple[str, ...] = (
     "CreatePhaseFieldInput",
     "UpdateFieldConditionInput",

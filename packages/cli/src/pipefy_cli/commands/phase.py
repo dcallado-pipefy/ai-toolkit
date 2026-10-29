@@ -13,6 +13,7 @@ from pipefy_sdk.phase_inventory import (
     get_phase_not_found_message,
     is_get_phase_not_found_error,
 )
+from pipefy_sdk.transition_hints import TRANSITION_RULES_HINT
 
 from pipefy_cli.commands._common import (
     ID_POSITIONAL_CONTEXT_SETTINGS,
@@ -159,8 +160,12 @@ def phase_create(
         None,
         "--index",
         help=(
-            "1-based insert among workflow phases; omit to append. "
-            "Does not set Connections (UI-only)."
+            "Float sort key: a value between two existing keys inserts "
+            "between those phases. Equal keys have no fixed order; use a "
+            "key no other phase has. A new pipe's Inbox, Doing and Done keys "
+            "are 1, 2 and 3, "
+            "and 0 omits the phase from get_pipe phases. get_pipe returns "
+            "each key as phases[].index, in ascending order."
         ),
     ),
     description: str | None = typer.Option(None, "--description", "-d"),
@@ -183,6 +188,7 @@ def phase_create(
         )
 
     run_cli_command(ctx, json_out, factory)
+    typer.echo(TRANSITION_RULES_HINT, err=True)
 
 
 @phase_app.command("update", context_settings=ID_POSITIONAL_CONTEXT_SETTINGS)
@@ -209,7 +215,11 @@ def phase_update(
     ),
     json_out: bool = typer.Option(False, "--json", "-j"),
 ) -> None:
-    """Update a phase (Pipefy ``UpdatePhaseInput``). Resolves current name when omitted."""
+    """Update a phase (Pipefy ``UpdatePhaseInput``). Resolves current name when omitted.
+
+    update_phase has no index field. To move a phase that has no cards, delete
+    it and create it again with the sort key.
+    """
 
     extra = parse_json_object(extra_json, "--extra")
     update_attrs: dict[str, Any] = {}
@@ -252,6 +262,7 @@ def phase_update(
         )
 
     run_cli_command(ctx, json_out, factory)
+    typer.echo(TRANSITION_RULES_HINT, err=True)
 
 
 @phase_app.command("delete", context_settings=ID_POSITIONAL_CONTEXT_SETTINGS)

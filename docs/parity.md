@@ -2,7 +2,7 @@
 
 This matrix is the source of truth for **MCP tool ↔ `pipefy` CLI** coverage. Update it whenever MCP tools or CLI commands are added, renamed, or removed.
 
-**Registry source:** `PIPEFY_TOOL_NAMES` in `packages/mcp/src/pipefy_mcp/tools/registry.py` (must stay in sync with this table: **187** tools).
+**Registry source:** `PIPEFY_TOOL_NAMES` in `packages/mcp/src/pipefy_mcp/tools/registry.py` (must stay in sync with this table: **196** tools).
 
 **Later CLI coverage:** areas such as attachments, field conditions, email, audit export, traditional automations, exports/usage, introspection, and raw GraphQL appear as **shipped** below when the matching Typer commands exist in `packages/cli`.
 
@@ -37,10 +37,11 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `create_ai_knowledge_base_document` | `pipefy kb document create` | shipped | Knowledge bases; one-shot PDF upload (presigned URL, S3 PUT, create mutation). Pipe-scoped (`--pipe-uuid`, `--file`, `--name`, `--description` <=900, all required). `.pdf` and 20 MiB cap enforced client-side; step-tagged errors (`file_read`/`presigned_url`/`s3_upload`/`kb_create`). CLI gates on the read-access probe. Indexing is asynchronous. |
 | `create_ai_knowledge_base_plain_text` | `pipefy kb plain-text create` | shipped | Knowledge bases; pipe-scoped (`--pipe-uuid`, `--name`, `--content` <=3500, `--description` <=900, all required). CLI gates on the read-access probe; limits fail fast client-side. |
 | `create_attachment_presigned_url` | `pipefy attachment presign` | shipped | Mints an S3 upload target (`upload_url` + `storage_path` object key + `expires_in_seconds`) without transferring bytes — the client PUTs the file to `upload_url`, then stores `storage_path` on the attachment field. Remote-safe (no filesystem, no bytes through the server). For attaching a file the server cannot read (a local file on the hosted profile, or large bytes). |
-| `create_automation` | `pipefy automation create` | shipped | (`--pipe`, `--name`, `--trigger-id`, `--action-id`, optional `--condition` / `--extra` JSON). First-class typed `condition` (expressions + AND-of-ORs `expressions_structure`; `field_address` = internal_id). |
+| `create_automation` | `pipefy automation create` | shipped | (`--pipe`, `--name`, `--trigger-id`, `--action-id`, optional `--condition` / `--extra` JSON). First-class typed `condition` (expressions + OR-of-ANDs `expressions_structure`; `field_address` = internal_id). |
 | `create_card` | `pipefy card create` | shipped | (`--fields` JSON, optional `--title`, optional `--phase-id` for `CreateCardInput.phase_id`). |
 | `create_card_relation` | `pipefy relation card create` | shipped | — |
 | `create_field_condition` | `pipefy field-condition create` | shipped | (`--phase`, `--name`, `--condition`, `--actions` JSON). MCP create re-reads the condition and reports success with `verified: true` when it exists on the requested phase; missing/wrong phase → `success: false` (delete the condition before recreating). If both post-create verify reads fail, MCP may still return success with a warning (verification unavailable). Also rejects `hide`/`hidden` on a `required=true` field before the mutation. CLI still returns the raw SDK response without those honesty checks (known MCP-ahead behavior). |
+| `create_html_interface` | `pipefy portal html-interface create` | shipped | Interfaces schema; creates an interface with one `customCode` page and writes its HTML in one call (two API calls under the hood); optional `data_sources`, `color` (defaults to `blue`). Remote-safe. |
 | `create_ipaas_connection` | — | deferred | iPaaS (Advanced Automations) connection creation; MCP-first surface, CLI twin considered with the other iPaaS tools. |
 | `create_label` | `pipefy label create` | shipped | `color` must be hex `#RGB` or `#RRGGBB` (validated before GraphQL). |
 | `create_llm_provider` | `pipefy ai-provider create` | shipped | Custom (BYOM) provider; configuration via local JSON file only (`--config-file`), never returned; probe-gated. |
@@ -52,7 +53,7 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `create_pipe_report` | `pipefy report-pipe create` | shipped | Reports domain; `filter` preflight validates ReportCardsFilter shape (nested `operator` + `queries`). |
 | `create_portal` | `pipefy portal create` | shipped | `--organization-uuid`; idempotent (find-or-create main portal). |
 | `create_portal_page` | `pipefy portal page create` | shipped | `--portal-uuid`, `--title`; optional `--description`, `--index`. Empty main portal may bootstrap a templated page when the API omits `elements`. |
-| `create_portal_element` | `pipefy portal element create` | shipped | `--page-id`, `--type`, `--metadata` JSON; optional `--data-sources` JSON array. SDK validates metadata before GraphQL. |
+| `create_portal_element` | `pipefy portal element create` | shipped | `--page-id`, `--type`, `--metadata` JSON; optional `--data-sources` JSON array, `--element-id` + `--layout` row array (create and place). Each row needs a non-empty id, type "row", and children as non-empty strings. SDK validates metadata, row shape, and layout placement before GraphQL. |
 | `create_sub_portal` | `pipefy portal sub-portal create` | shipped | `--main-portal-uuid`; optional `--name`. Interfaces `createSubPortal`. |
 | `create_send_task_automation` | `pipefy automation send-task create` | shipped | (task title + recipients; optional `--event-params` / `--condition` JSON). |
 | `create_service_account` | `pipefy service-account create` | shipped | Org service account (`--org` uuid, `--name` <=20, `--role`, optional `--description` / `--expiration-unit` + `--expiration-value`; optional `--pipe-ids` + `--pipe-role` default admin to add it to pipes immediately). Returns the OAuth2 client secret + token endpoint once (never logged); remote-safe. |
@@ -80,7 +81,7 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `delete_pipe_report` | `pipefy report-pipe delete` | shipped | Reports domain. MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt. |
 | `delete_portal` | `pipefy portal delete` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt. |
 | `delete_portal_page` | `pipefy portal page delete` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt; positional portal + page UUIDs. |
-| `delete_portal_element` | `pipefy portal element delete` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt; positional element + page UUIDs. |
+| `delete_portal_element` | `pipefy portal element delete` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt; positional element + page UUIDs. Optional `--layout` row array with the element removed prunes the grid in the same call; a row still listing the element is rejected before the call. |
 | `delete_service_account` | `pipefy service-account delete` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt; org + service account UUIDs; revokes the account's credentials. |
 | `delete_sub_portal` | `pipefy portal sub-portal delete` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt; internal_api `deleteSubPortalInterface` (irreversible). |
 | `delete_sub_portal_element` | `pipefy portal sub-portal detach` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt; internal_api `deleteSubPortalElement` (removes element wiring). |
@@ -94,7 +95,7 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `export_organization_report` | `pipefy report-org export` | shipped | Exports + organization reports. |
 | `export_pipe_audit_logs` | `pipefy audit export` | shipped | (`--pipe`); API queues export (JSON payload only). |
 | `export_pipe_report` | `pipefy report-pipe export` | shipped | Exports + reports; `filter` preflight validates ReportCardsFilter shape (nested `operator` + `queries`). |
-| `fill_card_phase_fields` | `pipefy card fill` | shipped | (`--phase`, `--fields` JSON, optional `--required-only`). Non-interactive; filters to editable phase field IDs before `update_card`. CLI is stricter than MCP when the phase has no editable fields (no-op vs unfiltered pass-through). Response may include `skipped_field_ids` for keys dropped by the filter. |
+| `fill_card_phase_fields` | `pipefy card fill` | shipped | (`--phase`, `--fields` JSON, optional `--required-only`). Non-interactive. Both surfaces filter to editable phase field IDs and skip the write when nothing survives; `skipped_field_ids` lists dropped keys. |
 | `find_cards` | `pipefy card find` | shipped | (`--pipe`, `--field`, `--value`). |
 | `find_records` | `pipefy record find` | shipped | (`--filter` JSON with `field_id` + `field_value`). Unified MCP envelope: top-level `pagination` uses `has_more` / `end_cursor` / `page_size` (same as `get_table_records`). |
 | `get_agents_usage` | `pipefy usage agents` | shipped | (`--organization`, `--from`, `--to`, optional `--filters` / `--search` / `--sort` JSON). |
@@ -103,7 +104,7 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `get_ai_agent_logs` | `pipefy agent logs list` | shipped | AI Agents domain. |
 | `get_ai_agents` | `pipefy agent list` | shipped | AI Agents domain. |
 | `get_ai_automation` | `pipefy ai-automation get` | shipped | AI Automations domain. |
-| `get_ai_automations` | `pipefy ai-automation list` | shipped | AI Automations domain. |
+| `get_ai_automations` | `pipefy ai-automation list` | shipped | AI Automations domain (`--pipe`; optional `--organization`; `--first` 1 to 50, `--after`). `pagination` is of the mixed `get_automations` page, then filtered to `generate_with_ai`. |
 | `get_ai_credit_usage` | `pipefy usage credits` | shipped | (`--organization`, `--period`). |
 | `get_ai_knowledge_base_data_lookup` | `pipefy kb data-lookup get` | shipped | Knowledge bases; pipe-scoped data lookup (`--id`, `--pipe-uuid`); the payload never includes `conditions` (the API does not expose them on reads). |
 | `get_ai_knowledge_base_document` | `pipefy kb document get` | shipped | Knowledge bases; pipe-scoped document metadata (`--id`, `--pipe-uuid`); `content` is the stored document URL, not the extracted text. |
@@ -118,7 +119,7 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `get_automation_jobs_export_csv` | `pipefy export automation-jobs-csv` (also `pipefy automation export csv`) | shipped | (export id argument). |
 | `get_automation_logs` | `pipefy automation logs --automation` | shipped | (mutually exclusive with `--repo`). |
 | `get_automation_logs_by_repo` | `pipefy automation logs --repo` | shipped | — |
-| `get_automations` | `pipefy automation list` | shipped | (optional `--organization` / `--pipe`). |
+| `get_automations` | `pipefy automation list` | shipped | (optional `--organization` / `--pipe`; `--first` 1 to 50, `--after` cursor). `--json` prints the whole page (`nodes`, `totalCount`, `pageInfo`); without `--json`, a table of each row's scalar columns plus `totalCount` / `hasNextPage`, with `event_params` and `condition` left to `--json`. |
 | `get_automations_usage` | `pipefy usage automations` (also `pipefy automation usage`) | shipped | (`--organization`, `--from`, `--to` ISO range). |
 | `get_available_ai_models` | `pipefy ai-provider models` | shipped | LLM provider discovery; vendor model list (`--provider-name`). |
 | `get_card` | `pipefy card get` | shipped | Supports `--include-fields`. |
@@ -141,16 +142,20 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `get_phase_allowed_move_targets` | `pipefy phase targets` | shipped | Read-only; mirrors Phase -> Connections (`cards_can_be_moved_to_phases`). |
 | `get_phase_cards` | `pipefy phase cards` | shipped | ``Phase.cards`` pagination (``--first`` default 50, ``--after``, ``--include-fields``). Prefer over ``get_cards`` for phase-local inventory. |
 | `get_phase_cards_count` | `pipefy phase count` | shipped | Native ``Phase.cards_count`` via ``get_phase``; pair with ``get_phase_cards`` to list. |
+| `get_interface_html` | `pipefy portal html-interface get` | shipped | Interfaces schema; read-only; HTML interface with each `customCode` element's live document. Raises on a grid-layout interface (use `get_portal`). Remote-safe. |
 | `get_phase_fields` | `pipefy field list --phase` | shipped | ``pipefy phase get`` returns the same shape. |
-| `get_pipe` | `pipefy pipe get` | shipped | `phases[].cards_count` on workflow phases; `start_form_fields` for start-form intake (start form not in `phases[]`). |
+| `get_pipe` | `pipefy pipe get` | shipped | `phases[].index` and `phases[].cards_count` on workflow phases; `start_form_fields` for start-form intake (start form not in `phases[]`). |
 | `get_pipe_members` | `pipefy member list` | shipped | — |
 | `get_pipe_relations` | `pipefy relation pipe list` | shipped | — |
 | `get_pipe_report` | `pipefy report-pipe get` | shipped | Reports domain. |
 | `get_pipe_report_columns` | `pipefy report-pipe columns` | shipped | Reports domain. |
 | `get_pipe_report_export` | (poll via `pipefy report-pipe export --format json`) | shipped | Reports + exports. |
 | `get_pipe_report_filterable_fields` | `pipefy report-pipe filterable-fields` | shipped | Reports domain. |
+| `get_interface_repo_fields` | `pipefy portal html-interface repo-fields` | shipped | Interfaces `interfacesRepoStructure`; read-only; a repo's custom fields, each keyed by `uuid` for a data source's `fieldKeys`. Remote-safe. |
+| `get_interface_html_guidelines` | `pipefy portal html-interface guidelines` | shipped | Interfaces schema; read-only; optional `include_design_system`; HTML/CSS authoring rules and data-source filter format for `customCode` content, the same for every organization. Remote-safe. |
 | `get_pipe_reports` | `pipefy report-pipe list` | shipped | Reports domain. |
 | `get_portal` | `pipefy portal get` | shipped | Interfaces schema; read-only; includes `published`. |
+| `get_records` | `pipefy card records` | shipped | Lists, counts and filters the cards of a pipe (``--pipe``, ``--where`` JSON filter, ``--search-term``, ``--phase``, ``--order-by`` JSON, ``--include-fields``, ``--first`` 1 to 50 / ``--after``). For a count, pass ``--first 1`` and read ``totalCount``. |
 | `get_start_form_fields` | `pipefy pipe start-form` | shipped | optional ``--required-only``. |
 | `get_table` | `pipefy table get` | shipped | — |
 | `get_table_record` | `pipefy record get` | shipped | — |
@@ -162,18 +167,21 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `introspect_query` | `pipefy introspect query` | shipped | — |
 | `introspect_type` | `pipefy introspect type` | shipped | — |
 | `invite_members` | `pipefy member invite` | shipped | — |
+| `list_interface_repos` | `pipefy portal html-interface repos` | shipped | Interfaces `interfaceRepos`; read-only; numeric `organization_id` only; the pipes and tables an interface can take as data sources, every page followed. Remote-safe. |
+| `list_interfaces` | `pipefy portal html-interface list` | shipped | Interfaces schema; read-only; an organization's HTML interfaces (`contentModeHtml`). Grid portals and sub-portals are not returned here (use `list_portals`). Remote-safe. |
 | `list_organizations` | `pipefy org list` | shipped | Lists organizations the caller can access; no id required. |
 | `list_portals` | `pipefy portal list` | shipped | `--organization-uuid`; at most one main portal per org. |
 | `move_card_to_phase` | `pipefy card move` | shipped | (`--phase`). On required-field failures MCP may return `success: false` naming the field (and an optional hide hint); CLI still returns the raw SDK / GraphQL error (known MCP-ahead behavior). |
 | `publish_sub_portal` | `pipefy portal sub-portal publish` | shipped | internal_api `updateSubPortalElement` on a templated `forms` element; check `subPortals[].published` via `get_portal`. |
-| `remove_member_from_pipe` | `pipefy member remove` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt. |
+| `remove_member_from_pipe` | `pipefy member remove` | shipped | MCP two-step with `confirmation_token`; CLI `--yes` or interactive prompt. Both surfaces read the members back and return `warning` when a user is still present. |
 | `reset_default_llm_provider` | `pipefy ai-provider default reset` | shipped | Organization-scoped; clears the org default (`--org-id`). |
 | `search_pipes` | `pipefy pipe list` | shipped | (`--name`, `--max-per-org`). |
 | `search_schema` | `pipefy introspect schema search` | shipped | (optional `--kind`). |
 | `search_tables` | `pipefy table list` | shipped | (without ``--ids``). |
-| `send_email_with_template` | `pipefy email template send` | shipped | (`--card`, `--template`). |
-| `send_inbox_email` | `pipefy email inbox send` | shipped | (`--from-email`, `--to`, `--subject`, `--body`). |
+| `send_email_with_template` | `pipefy email template send` | shipped | (`--card`, `--template`). MCP two-step with `confirmation_token`: the preview returns the message resolved for the card, and a changed resolution returns a fresh preview. CLI prints the email and exits 2 unless `--yes`. |
+| `send_inbox_email` | `pipefy email inbox send` | shipped | (`--from-email`, `--to`, `--subject`, `--body`). MCP two-step with `confirmation_token`: the preview returns the message, and the token binds to it. CLI prints the email and exits 2 unless `--yes`. |
 | `set_default_llm_provider` | `pipefy ai-provider default set` | shipped | Organization-scoped; exactly one of `--provider-id` / `--system-provider-id`. |
+| `set_interface_sources` | `pipefy portal html-interface set-sources` | shipped | Interfaces `updateElement` on an HTML interface's `customCode` element; replaces its data sources (`[]` removes them), keeping its `metadata` and `editable`. Sources are checked before the call. Remote-safe. |
 | `set_llm_provider_active_status` | `pipefy ai-provider set-active-status` | shipped | Custom (BYOM) provider; `--active/--inactive`; org from session. |
 | `set_role` | `pipefy member set-role` | shipped | — |
 | `set_table_record_field_value` | `pipefy record update` | shipped | (``--field-id`` + ``--value``). |
@@ -201,8 +209,8 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `update_pipe_report` | `pipefy report-pipe update` | shipped | Reports domain; `filter` preflight validates ReportCardsFilter shape (nested `operator` + `queries`). |
 | `update_portal` | `pipefy portal update` | shipped | (`--name`, `--visibility`, optional `--color`, `--icon`, header flags). |
 | `update_portal_page` | `pipefy portal page update` | shipped | positional portal + page UUIDs; at least one of `--title`, `--description`, `--index`. |
-| `update_portal_page_layout` | `pipefy portal page layout update` | shipped | `--page-id` + `--layout` JSON only (no portal UUID on the wire). |
-| `update_portal_element` | `pipefy portal element update` | shipped | positional element + page UUIDs; `--type` + full `--metadata` JSON (API replace-all). |
+| `update_portal_page_layout` | `pipefy portal page layout update` | shipped | `--page-id` + `--layout` JSON only (no portal UUID on the wire). Each row needs a non-empty id, type "row", and children as non-empty strings; `[]` is an empty page. Incomplete rows are rejected before the call. |
+| `update_portal_element` | `pipefy portal element update` | shipped | positional element + page UUIDs; `--type` + full `--metadata` JSON (API replace-all); one of `--data-sources` (replace-all, `'[]'` unlinks) or `--portal-uuid` (keep current bindings). |
 | `update_sub_portal_element` | `pipefy portal sub-portal attach` | shipped | positional portal, element, and sub-portal UUIDs; internal_api `updateSubPortalElement`. |
 | `update_table` | `pipefy table update` | shipped | — |
 | `update_table_field` | `pipefy table field update` | shipped | `--table` recommended; `--label`/`--description`/`--required`/`--options` or `--extra`. |
@@ -214,6 +222,7 @@ MCP destructive tools use a two-step `confirmation_token` (see [Destructive oper
 | `validate_ai_automation_prompt` | `pipefy ai-automation validate-prompt` | shipped | AI Automations validation tooling. |
 | `validate_knowledge_base_access` | `pipefy kb validate-access` | shipped | Knowledge base read-access probe (pipe-scoped, `--pipe-uuid`); green proves read access only (`read_ai_agents`), never write entitlement. |
 | `validate_llm_provider_access` | `pipefy ai-provider validate-access` | shipped | LLM provider read-access probe; green proves read access only, never write entitlement. |
+| `write_interface_html` | `pipefy portal html-interface write` | shipped | Interfaces schema; writes and publishes a `customCode` element's whole HTML document; raises `HtmlValidationError` (every violation listed) on `HTML_VALIDATION_FAILED`, stores nothing. Remote-safe. |
 
 ## Row count check
 
@@ -226,6 +235,6 @@ for n in m.body:
             print(len(v.args[0].elts))"
 ```
 
-Expect **187** tool names in `PIPEFY_TOOL_NAMES` and **187** data rows in the parity table (excluding the header rows).
+Expect **196** tool names in `PIPEFY_TOOL_NAMES` and **196** data rows in the parity table (excluding the header rows).
 
 When adding or removing an MCP tool, update **this file** and `PIPEFY_TOOL_NAMES` in the same change set.

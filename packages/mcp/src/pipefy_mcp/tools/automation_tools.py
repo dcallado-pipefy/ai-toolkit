@@ -7,6 +7,7 @@ from typing import Any
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
 from pipefy_sdk import (
+    AUTOMATIONS_LIST_MAX_PAGE_SIZE,
     AutomationConditionInput,
     CreateSendTaskAutomationInput,
     PipefyId,
@@ -20,13 +21,19 @@ from pipefy_mcp.tools.automation_tool_helpers import (
     build_automation_mutation_success_payload,
     build_automation_read_success_payload,
     build_automation_simulation_success_payload,
+    build_automations_listed_message,
     handle_automation_tool_graphql_error,
 )
 from pipefy_mcp.tools.destructive_tool_guard import check_destructive_confirmation
 from pipefy_mcp.tools.graphql_error_helpers import enrich_permission_denied_error
+from pipefy_mcp.tools.pagination_helpers import (
+    build_pagination_info,
+    validate_page_size,
+)
 from pipefy_mcp.tools.remote_profile import REMOTE
 from pipefy_mcp.tools.tool_context import get_pipefy_client
 from pipefy_mcp.tools.validation_helpers import (
+    format_validation_error_message,
     mutation_error_if_not_optional_dict,
     validate_optional_tool_id,
     validate_tool_id,
@@ -56,7 +63,9 @@ def _parse_condition_arg(
     try:
         parsed = AutomationConditionInput.model_validate(condition)
     except ValidationError as exc:
-        return None, build_automation_error_payload(f"Invalid 'condition': {exc}")
+        return None, build_automation_error_payload(
+            f"Invalid 'condition': {format_validation_error_message(exc)}"
+        )
     if not parsed.expressions:
         # An expressionless condition serializes to an empty payload that would
         # still win over extra_input.condition — almost always a mistake. Omit
@@ -128,25 +137,36 @@ class AutomationTools:
             ctx: Context,
             organization_id: PipefyId | None = None,
             pipe_id: PipefyId | None = None,
+            first: int | None = None,
+            after: str | None = None,
         ) -> dict[str, Any]:
-            """List traditional automation rules, optionally filtered by organization and/or pipe.
+            """List one page of traditional automation rules, filtered by organization and/or pipe.
 
-            Use this to discover automation IDs in a pipe or org before calling ``get_automation``
-            for full payloads, or to plan ``create_automation`` / ``update_automation`` without
-            listing unrelated rules.
+            Each row includes ``event_id``, ``event_params``, ``condition``,
+            ``actionEnabled``, and ``disabledReason`` for auditing triggers, filters,
+            and whether the action is enabled, without a detail call per rule. An empty
+            condition expression is the API placeholder, not an active filter.
+            Use ``get_automation`` for full action payloads before changing a rule.
 
-            Combine with ``get_automation`` for full detail. When only ``pipe_id`` is set (no
-            ``organization_id``), the server resolves the org from the pipe first, then lists
-            automations — two sequential API calls vs. one when you pass ``organization_id``
-            directly.
+            The API returns at most 50 rules per call. ``pagination.total_count`` is
+            the full count; while ``pagination.has_more`` is true, call again with
+            ``after=pagination.end_cursor``. An audit is complete only when
+            ``has_more`` is false.
+
+            When only ``pipe_id`` is set (no ``organization_id``), the server resolves
+            the org from the pipe first, then lists automations. That is two sequential
+            API calls; passing ``organization_id`` directly needs one.
 
             Args:
                 organization_id: When set, restrict to this organization; omit for no org filter.
                 pipe_id: When set, restrict to this pipe; omit for no pipe filter.
+                first: Page size, 1 to 50 (the API cap). Defaults to 50.
+                after: ``pagination.end_cursor`` from the previous page.
 
             Returns:
-                On success, ``success``, ``message``, and ``data`` with the list of automation
-                summaries returned by the API. On validation or GraphQL errors, ``success: False``
+                On success, ``success``, ``message``, ``data`` with this page's automation
+                summaries, and ``pagination`` (``has_more``, ``end_cursor``, ``page_size``,
+                ``total_count``). On validation or GraphQL errors, ``success: False``
                 with ``error``.
             """
             client = get_pipefy_client(ctx)
@@ -158,10 +178,18 @@ class AutomationTools:
             ok_p, pipe, pipe_err = validate_optional_tool_id(pipe_id, "pipe_id")
             if pipe_err is not None:
                 return pipe_err
+            page_size, size_err = validate_page_size(
+                first, max_size=AUTOMATIONS_LIST_MAX_PAGE_SIZE
+            )
+            if size_err is not None:
+                return size_err
+            cursor = after.strip() if after is not None and after.strip() else None
             try:
-                rows = await client.get_automations(
+                page = await client.get_automations(
                     organization_id=org,
                     pipe_id=pipe,
+                    first=page_size,
+                    after=cursor,
                 )
             except Exception as exc:  # noqa: BLE001
                 return await handle_automation_tool_graphql_error(
@@ -171,9 +199,17 @@ class AutomationTools:
                     resource_kind="pipe" if pipe else "organization",
                     resource_id=pipe or org,
                 )
+            pagination = build_pagination_info(
+                page_info=page["pageInfo"], page_size=page_size
+            )
+            pagination["total_count"] = page["totalCount"]
+            rows = page["nodes"]
             return build_automation_read_success_payload(
                 rows,
-                "Automations listed.",
+                build_automations_listed_message(
+                    len(rows), page["totalCount"], has_more=pagination["has_more"]
+                ),
+                pagination=pagination,
             )
 
         @mcp.tool(
@@ -360,7 +396,7 @@ class AutomationTools:
             )
             if bad is not None:
                 return bad
-            if name is not None and (not isinstance(name, str) or not name.strip()):
+            if name is not None and not name.strip():
                 return build_automation_error_payload(
                     message="Invalid 'name': provide a non-empty string when supplied.",
                 )
@@ -373,7 +409,7 @@ class AutomationTools:
                     event_params=event_params,
                     action_params=action_params,
                     condition=condition,
-                    name=name.strip() if isinstance(name, str) else None,
+                    name=name.strip() if name is not None else None,
                     extra_input=extra_input,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -446,10 +482,10 @@ class AutomationTools:
 
             Common ``value`` tokens when ``inputMode`` is ``copy_from``:
 
-            - ``%{id}`` — triggering card id (use in ``card_id``, not only ``value``)
-            - ``%{created_at}`` — card creation timestamp
-            - ``%{automation_event_execution_datetime}`` — automation run timestamp
-            - ``%{<internal_id>}`` — copy from another field (digits only, e.g. ``%{429659034}``)
+            - ``%{id}``: triggering card id (use in ``card_id``, not only ``value``)
+            - ``%{created_at}``: card creation timestamp
+            - ``%{automation_event_execution_datetime}``: automation run timestamp
+            - ``%{<internal_id>}``: copy from another field (digits only, e.g. ``%{421234567}``)
 
             **Condition** (``condition``) — gate the rule on field tests. It is a
             ``ConditionInput``: ``{"expressions": [...], "expressions_structure": [[...]]}``.
@@ -457,8 +493,12 @@ class AutomationTools:
             "value": "<value>", "structure_id": <int>}``. ``field_address`` is the field
             **internal_id** (numeric; the last dotted segment when addressing a connected
             card's field), **not** a slug. ``expressions_structure`` groups expressions by
-            ``structure_id`` as AND-of-ORs: each inner array is OR'd, the inner arrays are
-            AND'd — e.g. ``[[0, 1], [2]]`` is ``(expr0 OR expr1) AND expr2``. ``operation``
+            ``structure_id`` (not position) as OR-of-ANDs: the expressions in one inner array
+            are AND'd, and the inner arrays are OR'd, e.g. ``[[0, 1], [2]]`` is
+            ``(expr0 AND expr1) OR expr2``. Give each expression its own ``structure_id``.
+            The API silently drops a number that matches no ``structure_id``, an expression
+            the structure does not list, and an expression with no ``field_address`` or
+            ``operation``; an empty ``expressions_structure`` matches every card. ``operation``
             is one of: ``equals``, ``not_equals``, ``present``, ``blank``,
             ``string_contains``, ``string_not_contains``, ``number_greater_than``,
             ``number_less_than``, ``date_is_today``, ``date_is_yesterday``,
@@ -494,7 +534,7 @@ class AutomationTools:
             aid, aid_err = validate_tool_id(action_id, "action_id")
             if aid_err is not None:
                 return aid_err
-            if not isinstance(name, str) or not name.strip():
+            if not name.strip():
                 return build_automation_error_payload(
                     message="Invalid 'name': provide a non-empty string.",
                 )
@@ -611,7 +651,9 @@ class AutomationTools:
                     condition=condition,
                 )
             except ValidationError as exc:
-                return build_automation_error_payload(str(exc))
+                return build_automation_error_payload(
+                    format_validation_error_message(exc)
+                )
 
             try:
                 raw = await client.create_send_task_automation(
@@ -659,7 +701,7 @@ class AutomationTools:
             ``inputMode``, ``value``, ``card_id``, ``fields_map_order``).
 
             Pass ``condition`` to replace the rule's trigger condition; its shape, the
-            ``field_address`` = internal_id rule, the ``expressions_structure`` AND-of-ORs
+            ``field_address`` = internal_id rule, the ``expressions_structure`` OR-of-ANDs
             grouping, and the ``operation`` values are documented on ``create_automation``.
             A ``condition`` argument wins over any ``condition`` in ``extra_input``.
 

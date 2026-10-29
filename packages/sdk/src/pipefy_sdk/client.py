@@ -10,10 +10,22 @@ from httpx import Auth
 
 from pipefy_sdk import __version__
 from pipefy_sdk.ai_pipe_validation import resolve_and_populate_field_refs
+from pipefy_sdk.ai_preflight import (
+    filter_ai_automation_summaries,
+    validate_ai_agent_behaviors_sdk,
+    validate_ai_automation_prompt_sdk,
+)
 from pipefy_sdk.automation_input import normalize_automation_input_keys
 from pipefy_sdk.automation_preflight import (
     validate_automation_field_map_field_ids,
     validate_traditional_automation_move_transition,
+)
+from pipefy_sdk.exceptions import AiAgentConfigureError
+from pipefy_sdk.field_filters import (
+    filter_editable_field_definitions,
+    filter_fields_by_definitions,
+    phase_fill_no_write_result,
+    skipped_field_ids,
 )
 from pipefy_sdk.graphql_executor import (
     AuthenticatedExecutor,
@@ -29,6 +41,7 @@ from pipefy_sdk.graphql_inputs import (
     UpdatePhaseInput,
     UpdatePipeInput,
 )
+from pipefy_sdk.member_removal import MemberRemovalResult, verify_member_removal
 from pipefy_sdk.models.ai_agent import (
     BehaviorInput,
     CreateAiAgentInput,
@@ -45,7 +58,13 @@ from pipefy_sdk.models.attachment import (
     AttachmentUploadResult,
     PresignedUploadTarget,
 )
+from pipefy_sdk.models.inbox_email import InboxEmailDraft
 from pipefy_sdk.models.knowledge_base import DataLookupCondition
+from pipefy_sdk.models.portal import (
+    InterfaceDataSource,
+    PortalColor,
+    PortalPageLayoutRow,
+)
 from pipefy_sdk.services.advanced_automations_service import AdvancedAutomationsService
 from pipefy_sdk.services.ai_agent_service import AiAgentService
 from pipefy_sdk.services.attachment_service import AttachmentService
@@ -53,8 +72,8 @@ from pipefy_sdk.services.automation_graphql_types import (
     AutomationActionRow,
     AutomationEventAttributeRow,
     AutomationEventRow,
+    AutomationListPage,
     AutomationRuleRecord,
-    AutomationRuleSummary,
     CreateAutomationMutationResult,
     DeleteAutomationServiceResult,
     SimulateAutomationServiceResult,
@@ -95,6 +114,9 @@ from pipefy_sdk.services.types import (
     AiAgentGraphPayload,
     AutomationServiceResult,
     CardSearch,
+    CreatePipeLabel,
+    CreatePipePhase,
+    CreatePipeStartFormField,
     KnowledgeBaseAccessProbeResult,
     KnowledgeBaseDataLookupPayload,
     KnowledgeBaseDeleteResult,
@@ -108,6 +130,8 @@ from pipefy_sdk.services.types import (
     MePayload,
     ProviderAccessProbeResult,
     ProviderDependenciesResult,
+    RecordFilter,
+    RecordOrder,
     ToggleAgentStatusResult,
 )
 from pipefy_sdk.services.user_service import UserService
@@ -356,9 +380,37 @@ class PipefyClient:
         """Get a pipe with AI preferences, phases with fields, and start form fields."""
         return await self._pipe_service.get_pipe_with_preferences(pipe_id)
 
-    async def create_pipe(self, name: str, organization_id: str | int) -> dict:
-        """Create a new pipe in the organization."""
-        return await self._pipe_config_service.create_pipe(name, organization_id)
+    async def create_pipe(
+        self,
+        name: str,
+        organization_id: str | int,
+        phases: list[CreatePipePhase] | None = None,
+        start_form_fields: list[CreatePipeStartFormField] | None = None,
+        labels: list[CreatePipeLabel] | None = None,
+    ) -> dict:
+        """Create a new pipe in the organization.
+
+        With ``phases``, the pipe gets exactly those phases, in that order, each
+        connected to the phases beside it. Without it, the pipe gets Pipefy's
+        default Inbox, Doing and Done. Phase names must be unique.
+        ``start_form_fields`` and ``labels`` are created in the same call. The
+        result lists the new pipe's phases, start form fields and labels with
+        their ids.
+
+        Raises:
+            ValueError: A phase name is blank or repeated, or a label color is not
+                hex. Nothing was created.
+            PipePhaseSetupError: The pipe was created, but setting up its phases
+                failed. It carries ``pipe_id`` and ``created_phases`` for recovery;
+                the failed call's error is ``__cause__``.
+        """
+        return await self._pipe_config_service.create_pipe(
+            name,
+            organization_id,
+            phases=phases,
+            start_form_fields=start_form_fields,
+            labels=labels,
+        )
 
     async def update_pipe(self, input: UpdatePipeInput) -> dict:
         """Update pipe attributes."""
@@ -755,6 +807,19 @@ class PipefyClient:
         """
         return await self._member_service.remove_members_from_pipe(pipe_id, user_ids)
 
+    async def remove_member_from_pipe(
+        self, pipe_id: str, user_ids: list[str]
+    ) -> MemberRemovalResult:
+        """Remove users from a pipe, then read members back to detect a no-op.
+
+        Runs the same mutation as :meth:`remove_members_from_pipe` (the raw
+        mutation with no read-back), then verifies whether any requested user
+        remains. Org-level permissions can override pipe-level removal.
+        """
+        raw = await self.remove_members_from_pipe(pipe_id, user_ids)
+        warning = await verify_member_removal(self, pipe_id, user_ids)
+        return {"data": raw, "warning": warning}
+
     async def set_role(
         self, pipe_id: str, member_id: str, role_name: str
     ) -> dict[str, Any]:
@@ -833,6 +898,39 @@ class PipefyClient:
             card_uuid=card_uuid,
         )
 
+    async def draft_email_from_template(
+        self,
+        card_id: str,
+        email_template_id: str,
+        *,
+        to: list[str] | None = None,
+        from_: str | None = None,
+        **attrs: Any,
+    ) -> InboxEmailDraft:
+        """Resolve a template for a card into the email a send would deliver.
+
+        Reads only: nothing is sent. Show the draft for approval, then send it
+        with ``send_inbox_email_draft``.
+
+        Args:
+            card_id: Numeric ID of the card with inbox.
+            email_template_id: ID of the email template.
+            to: Optional override for recipients; if omitted, uses template's toEmail.
+            from_: Optional override for sender; if omitted, uses template's fromEmail.
+            **attrs: Extra CreateAndSendInboxEmailInput fields (cc, bcc, repoId, etc.).
+        """
+        return await self._webhook_service.draft_email_from_template(
+            card_id,
+            email_template_id,
+            to=to,
+            from_=from_,
+            **attrs,
+        )
+
+    async def send_inbox_email_draft(self, draft: InboxEmailDraft) -> dict[str, Any]:
+        """Send an ``InboxEmailDraft`` as-is, e.g. one from ``draft_email_from_template``."""
+        return await self._webhook_service.send_inbox_email_draft(draft)
+
     async def send_email_with_template(
         self,
         card_id: str,
@@ -898,16 +996,60 @@ class PipefyClient:
         """Get a traditional automation rule by ID (trigger, actions, status)."""
         return await self._automation_service.get_automation(automation_id)
 
+    async def get_pipe_organization_id(self, pipe_id: str) -> str | None:
+        """Resolve the organization that owns ``pipe_id``, or None when the API omits it.
+
+        Paging the same pipe's automations resolves this once and passes it on every
+        page, rather than letting ``get_automations`` look it up per call.
+        """
+        return await self._automation_service.get_pipe_organization_id(pipe_id)
+
     async def get_automations(
         self,
         organization_id: str | None = None,
         pipe_id: str | None = None,
-    ) -> list[AutomationRuleSummary]:
-        """List traditional automation rules for an organization and/or pipe."""
+        *,
+        first: int | None = None,
+        after: str | None = None,
+    ) -> AutomationListPage:
+        """List one page of traditional automation rules for an organization and/or pipe.
+
+        The API caps a page at 50 rules; read ``pageInfo.hasNextPage`` and ``totalCount``
+        before treating the page as the complete set.
+        """
         return await self._automation_service.get_automations(
             organization_id=organization_id,
             pipe_id=pipe_id,
+            first=first,
+            after=after,
         )
+
+    async def get_ai_automation(
+        self, automation_id: str
+    ) -> AutomationRuleRecord | None:
+        """Return an automation rule by id, or None when the id is missing."""
+        return await self.get_automation(automation_id)
+
+    async def get_ai_automations(
+        self,
+        pipe_id: str,
+        organization_id: str | None = None,
+        *,
+        first: int | None = None,
+        after: str | None = None,
+    ) -> AutomationListPage:
+        """List one page of AI (``generate_with_ai``) automation rules for a pipe.
+
+        The row filter runs after the page, so ``totalCount`` and ``pageInfo``
+        describe the mixed connection.
+        """
+        page = await self.get_automations(
+            organization_id=organization_id,
+            pipe_id=pipe_id,
+            first=first,
+            after=after,
+        )
+        return {**page, "nodes": filter_ai_automation_summaries(page["nodes"])}
 
     async def get_automation_actions(self, pipe_id: str) -> list[AutomationActionRow]:
         """List available automation action types for a pipe (for building create/update payloads)."""
@@ -1068,6 +1210,12 @@ class PipefyClient:
     ) -> DeleteAutomationServiceResult:
         """Delete a traditional automation rule by ID (permanent)."""
         return await self._automation_service.delete_automation(automation_id)
+
+    async def delete_ai_automation(
+        self, automation_id: str
+    ) -> DeleteAutomationServiceResult:
+        """Delete an automation rule by id."""
+        return await self.delete_automation(automation_id)
 
     async def get_ai_agent(self, agent_uuid: str) -> AiAgentGraphPayload:
         """Get an AI Agent by UUID (name, instruction, behaviors)."""
@@ -1368,13 +1516,43 @@ class PipefyClient:
     async def create_ai_agent(
         self, agent_input: CreateAiAgentInput
     ) -> AgentServiceResult:
-        """Create an AI Agent (empty, no behaviors).
+        """Create an AI Agent and write its instruction and behaviors.
 
-        Callers are still responsible for pre-Pydantic prep (``normalize_pipefy_ai_instruction_tokens``
-        / ``expand_behaviors_placeholders``) where applicable because those run before
-        :class:`CreateAiAgentInput` validation at the tool/CLI boundary.
+        Runs ``createAiAgent`` and then :meth:`update_ai_agent`. The API stamps
+        ``disabledAt`` on a new agent, and only an update with an active behavior
+        clears it, so the update omits ``disabledAt`` unless ``agent_input.disabled_at``
+        is set. Placeholder and token prep happen when :class:`CreateAiAgentInput`
+        validates.
+
+        Raises:
+            AiAgentConfigureError: The agent was created but the update failed. It
+                carries ``agent_uuid`` for recovery; the update's error is ``__cause__``.
         """
-        return await self._ai_agent_service.create_agent(agent_input)
+        created = await self._ai_agent_service.create_agent(agent_input)
+        agent_uuid = created["agent_uuid"]
+        try:
+            updated = await self.update_ai_agent(
+                UpdateAiAgentInput(
+                    uuid=agent_uuid,
+                    name=agent_input.name,
+                    repo_uuid=agent_input.repo_uuid,
+                    instruction=agent_input.instruction,
+                    behaviors=agent_input.behaviors,
+                    data_source_ids=agent_input.data_source_ids,
+                    disabled_at=agent_input.disabled_at,
+                    preserve_disabled_at=False,
+                )
+            )
+        except Exception as exc:
+            raise AiAgentConfigureError(
+                agent_uuid=agent_uuid,
+                disabled_at=created["disabled_at"],
+                reason=str(exc),
+            ) from exc
+        return {
+            **updated,
+            "message": f"AI Agent created and configured successfully. UUID: {agent_uuid}",
+        }
 
     async def update_ai_agent(
         self, agent_input: UpdateAiAgentInput
@@ -1383,10 +1561,8 @@ class PipefyClient:
 
         Resolves field-slug references inside behaviors to numeric IDs and
         populates ``referencedFieldIds`` before calling the service, so
-        callers do not need to remember the prep step. Callers are still
-        responsible for pre-Pydantic prep (``normalize_pipefy_ai_instruction_tokens``
-        / ``expand_behaviors_placeholders``) because those run before
-        :class:`UpdateAiAgentInput` validation.
+        callers do not need to remember the prep step. Placeholder and token
+        prep happen when :class:`UpdateAiAgentInput` validates.
         """
         raw_behaviors = [b.model_dump(by_alias=True) for b in agent_input.behaviors]
         resolved_dicts = await resolve_and_populate_field_refs(self, raw_behaviors)
@@ -1417,6 +1593,46 @@ class PipefyClient:
     ) -> AutomationServiceResult:
         """Update an existing AI Automation via the public ``updateAutomation``."""
         return await self._automation_service.update_ai_automation(automation_input)
+
+    async def validate_ai_agent_behaviors(
+        self,
+        pipe_id: str,
+        behaviors: list[dict[str, Any]],
+        *,
+        strict_unknown_action_types: bool = True,
+        data_source_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Dry-run AI Agent behaviors against a pipe's fields, phases, and relations (read-only).
+
+        Call before :meth:`create_ai_agent` / :meth:`update_ai_agent`. Delegates to
+        :func:`pipefy_sdk.ai_preflight.validate_ai_agent_behaviors_sdk`; see it for the
+        checks and the ``{success, valid, problems, warnings, message}`` result.
+        """
+        return await validate_ai_agent_behaviors_sdk(
+            self,
+            pipe_id,
+            behaviors,
+            strict_unknown_action_types=strict_unknown_action_types,
+            data_source_ids=data_source_ids,
+        )
+
+    async def validate_ai_automation_prompt(
+        self,
+        pipe_id: str,
+        prompt: str,
+        field_ids: list[str],
+        event_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Pre-flight an AI Automation prompt, output fields, and trigger (read-only).
+
+        Call before :meth:`create_ai_automation`. Delegates to
+        :func:`pipefy_sdk.ai_preflight.validate_ai_automation_prompt_sdk`; see it for the
+        checks and the ``{success, valid, problems, warnings, field_map}`` result. A failed
+        pipe read returns only ``{success, valid, error}``, with ``success`` false.
+        """
+        return await validate_ai_automation_prompt_sdk(
+            self, pipe_id, prompt, field_ids, event_id
+        )
 
     async def get_pipe_members(self, pipe_id: str | int) -> dict:
         """Get the members of a pipe."""
@@ -1476,6 +1692,37 @@ class PipefyClient:
         """
         return await self._card_service.get_cards(
             pipe_id, search, include_fields=include_fields, first=first, after=after
+        )
+
+    async def get_records(
+        self,
+        pipe_id: str | int,
+        where: RecordFilter | None = None,
+        search_term: str | None = None,
+        phase_id: str | int | None = None,
+        order_by: list[RecordOrder] | None = None,
+        include_fields: bool = False,
+        *,
+        first: int | None = None,
+        after: str | None = None,
+    ) -> dict:
+        """List, count and filter the cards of a pipe (the ``records`` GraphQL query).
+
+        Returns camelCase ``{"records": {totalCount, pageInfo, edges}}``; ``totalCount`` is the whole result.
+        ``field`` (in ``where`` and ``order_by``) takes the lowercase, hyphenated field uuid, else ``ValueError``.
+        ``in`` matches any and ``contains`` all; ``like``/``ilike`` match each word, any case (``%`` is literal).
+        Dates take an offset, but a ``date`` field the bare date. ``first`` is 1 to 50 (larger is capped); with ``where`` or
+        ``search_term`` pages stop at 10,000. Page by passing ``endCursor`` back as ``after``.
+        """
+        return await self._card_service.get_records(
+            pipe_id,
+            where,
+            search_term,
+            phase_id,
+            order_by,
+            include_fields,
+            first=first,
+            after=after,
         )
 
     async def find_cards(
@@ -1539,6 +1786,50 @@ class PipefyClient:
             due_date=due_date,
             field_updates=field_updates,
         )
+
+    async def fill_card_phase_fields(
+        self,
+        card_id: str | int,
+        phase_id: str | int,
+        fields: dict[str, Any] | None,
+        *,
+        required_fields_only: bool = False,
+    ) -> dict[str, Any]:
+        """Fill a card's phase fields using only IDs the phase exposes as editable.
+
+        Reads :meth:`get_phase_fields` once, then writes via :meth:`update_card`
+        only when at least one value survives the editable-id filter. Dropped
+        keys are returned in ``skipped_field_ids``; a write that drops nothing
+        omits that key. When nothing survives, no
+        write is issued; the result reports ``success``, ``message``,
+        ``phase_id``, ``phase_name``, and ``skipped_field_ids``. Pass
+        ``required_fields_only=True`` to filter phase definitions to required
+        fields only (forwarded as ``required_only`` on :meth:`get_phase_fields`).
+        """
+        phase_fields_result = await self.get_phase_fields(
+            phase_id, required_only=required_fields_only
+        )
+        expected_fields = filter_editable_field_definitions(
+            phase_fields_result.get("fields", [])
+        )
+        given_fields = fields or {}
+        field_data = filter_fields_by_definitions(given_fields, expected_fields)
+        if not field_data:
+            return phase_fill_no_write_result(
+                phase_fields_result,
+                fields,
+                phase_id=phase_id,
+                required_fields_only=required_fields_only,
+            )
+        dropped = skipped_field_ids(given_fields, field_data)
+        field_updates = [
+            {"field_id": field_id, "value": value}
+            for field_id, value in field_data.items()
+        ]
+        api_response = await self.update_card(card_id, field_updates=field_updates)
+        if dropped:
+            return {**api_response, "skipped_field_ids": dropped}
+        return api_response
 
     async def delete_card(self, card_id: str | int) -> dict:
         """Delete a card by its ID."""
@@ -1843,6 +2134,184 @@ class PipefyClient:
         """
         return await self._portal_service.get_portal(portal_uuid)
 
+    async def list_html_interfaces(
+        self,
+        organization_uuid: str | int,
+        search_term: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List an organization's HTML interfaces (``contentModeHtml``).
+
+        Args:
+            organization_uuid: Organization UUID, or numeric organization id.
+            search_term: Optional name filter.
+        """
+        return await self._portal_service.list_html_interfaces(
+            organization_uuid, search_term=search_term
+        )
+
+    async def get_html_interface(self, interface_uuid: str) -> dict[str, Any]:
+        """Fetch an HTML interface with each element's live HTML document.
+
+        Args:
+            interface_uuid: HTML interface UUID.
+
+        Raises:
+            PipefyGraphQLError: No interface has this uuid; the API answers a
+                missing uuid with an error.
+            ValueError: The interface is a grid interface, or the response has no
+                interface.
+        """
+        return await self._portal_service.get_html_interface(interface_uuid)
+
+    async def write_html_document(
+        self, *, page_id: str, element_id: str, content: str
+    ) -> dict[str, Any]:
+        """Write and publish the HTML of an HTML interface's ``customCode`` element.
+
+        Args:
+            page_id: Page holding the element.
+            element_id: The page's ``customCode`` element.
+            content: The whole HTML document; it replaces the live one.
+
+        Raises:
+            HtmlValidationError: The HTML broke the API's HTML rules; nothing was
+                stored, and ``violations`` lists every rule it broke.
+            PortalPermissionError: The caller cannot update the interface.
+            PipefyGraphQLError: No page has this id, or the element is not on the
+                page; the API answers a missing target with an error.
+        """
+        return await self._portal_service.write_html_document(
+            page_id=page_id, element_id=element_id, content=content
+        )
+
+    async def list_interface_repos(
+        self,
+        organization_id: str | int,
+        *,
+        interface_uuid: str | None = None,
+        repo_name: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List the pipes and tables an interface element can take as a data source.
+
+        Args:
+            organization_id: Numeric organization id; a uuid is rejected.
+            interface_uuid: Interface the source is for. For a portal or
+                sub-portal, the organization's findable published pipes qualify;
+                otherwise the published pipes and tables the caller administers.
+            repo_name: Case-insensitive part of the repo name.
+
+        Raises:
+            ValueError: ``organization_id`` is not numeric; nothing is sent.
+        """
+        return await self._portal_service.list_interface_repos(
+            organization_id, interface_uuid=interface_uuid, repo_name=repo_name
+        )
+
+    async def get_interface_repo_fields(
+        self, repo_uuid: str, *, interface_uuid: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List a pipe's or table's custom fields, for an interface data source.
+
+        A custom field's data source key is its ``uuid``. The built-in keys (such
+        as ``title``) come from ``get_interface_html_guidelines``, as
+        ``filters.fixedColumnNames``.
+
+        Args:
+            repo_uuid: The repo's uuid, as ``list_interface_repos`` returns it.
+            interface_uuid: Interface the source is for.
+
+        Raises:
+            ValueError: The response has no repo structure.
+            PipefyGraphQLError: No repo has this uuid, or the caller cannot read it.
+        """
+        return await self._portal_service.get_interface_repo_fields(
+            repo_uuid, interface_uuid=interface_uuid
+        )
+
+    async def set_interface_sources(
+        self,
+        page_id: str,
+        element_id: str,
+        data_sources: list[InterfaceDataSource | dict[str, Any]],
+        *,
+        interface_uuid: str,
+    ) -> dict[str, Any]:
+        """Replace the data sources of an HTML interface's ``customCode`` element.
+
+        The element's ``metadata`` and ``editable`` are read and sent back unchanged.
+
+        Args:
+            page_id: Page holding the element.
+            element_id: The page's ``customCode`` element.
+            data_sources: The complete source list (``id``, ``name``, ``repoId``,
+                ``fieldKeys``, optional ``filters``); ``[]`` removes them all.
+            interface_uuid: HTML interface holding the page.
+
+        Returns:
+            The element ``id`` (and ``uuid``) and the ``dataSources`` as sent, once
+            the update reports success; they are not read back. Call
+            ``get_html_interface`` for the stored sources.
+
+        Raises:
+            pydantic.ValidationError: ``data_sources`` breaks a source rule; nothing
+                is sent.
+            ValueError: The element is not on page ``page_id``, is not ``customCode``,
+                or the update reports ``success=false``.
+            PortalPermissionError: The caller cannot update the interface.
+            PipefyGraphQLError: The caller cannot manage a repo that a new or
+                widened source reads; nothing is stored.
+        """
+        return await self._portal_service.set_interface_sources(
+            page_id, element_id, data_sources, interface_uuid=interface_uuid
+        )
+
+    async def get_interface_html_guidelines(
+        self, *, include_design_system: bool = False
+    ) -> dict[str, Any]:
+        """Fetch the rules, data-binding vocabulary and design system for ``customCode`` HTML.
+
+        Returns the allowed tags and attributes, every forbidden tag/attribute/CSS
+        construct with its violation code, the full error-code list,
+        ``dataPfyVocabulary`` (what each ``data-pfy-*`` attribute does, for most
+        which element it goes on, and the value it takes), the filter-tree
+        format (a worked example plus the operators each field type supports),
+        and content-size and nesting limits. The rules are the same for every
+        organization.
+
+        Args:
+            include_design_system: Also select ``designSystem``, a component
+                catalog (tokens, icons and components with usage examples) to
+                style generated content consistently. It is most of the
+                response, so the query skips it unless asked.
+        """
+        return await self._portal_service.get_interface_html_guidelines(
+            include_design_system=include_design_system
+        )
+
+    async def create_interface(
+        self,
+        organization_uuid: str | int,
+        name: str,
+        *,
+        color: PortalColor = "blue",
+        data_sources: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Create an HTML interface (``contentModeHtml``) with one ``customCode`` page.
+
+        Args:
+            organization_uuid: Organization UUID or numeric organization id.
+            name: Interface name; also used as the one page's title.
+            color: A ``PortalColor`` value, e.g. ``blue`` or ``purple``.
+                Defaults to ``blue``.
+            data_sources: The page's element's source bindings; ``[]``/``None``
+                for none. Each source has ``id`` (the handle the HTML reads it
+                by), ``name``, ``repoId``, ``fieldKeys`` (1 to 30) and optional
+                ``filters``. At most 10 sources; ``id``/``name`` unique among them.
+        """
+        return await self._portal_service.create_interface(
+            organization_uuid, name, color=color, data_sources=data_sources
+        )
+
     async def create_portal(self, organization_uuid: str | int) -> dict[str, Any]:
         """Create or fetch the organization's main portal (idempotent).
 
@@ -1960,13 +2429,16 @@ class PipefyClient:
         return await self._portal_service.sort_portal_pages(interface_uuid, page_ids)
 
     async def update_portal_page_layout(
-        self, page_id: str, layout: dict[str, Any]
+        self, page_id: str, layout: list[PortalPageLayoutRow | dict[str, Any]]
     ) -> dict[str, Any]:
         """Update a portal page grid layout.
 
         Args:
             page_id: Page UUID.
-            layout: Layout JSON for ``updatePageLayout``.
+            layout: Full row array from ``get_portal`` -> ``pages[].layout``, as
+                dicts or parsed rows. Each row needs a non-empty id, type
+                ``"row"``, and children as non-empty strings. ``[]`` is an empty
+                page.
         """
         return await self._portal_service.update_portal_page_layout(page_id, layout)
 
@@ -1979,7 +2451,7 @@ class PipefyClient:
         data_sources: list[dict[str, Any]] | None = None,
         element_id: str | None = None,
         editable: bool | None = None,
-        layout: dict[str, Any] | None = None,
+        layout: list[PortalPageLayoutRow | dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Create a portal page element.
 
@@ -1990,7 +2462,11 @@ class PipefyClient:
             data_sources: Optional data source bindings.
             element_id: Optional client-provided element UUID.
             editable: Optional editable flag.
-            layout: Optional layout JSON.
+            layout: Optional full page layout row array (``get_portal`` ->
+                ``pages[].layout``) with a row whose children list ``element_id``,
+                to create and place in one call. Each row needs a non-empty id,
+                type ``"row"``, and children as non-empty strings. Omit to leave
+                the grid untouched.
         """
         return await self._portal_service.create_portal_element(
             page_id,
@@ -2010,6 +2486,7 @@ class PipefyClient:
         type: str,
         metadata: dict[str, Any],
         data_sources: list[dict[str, Any]] | None = None,
+        portal_uuid: str | None = None,
         editable: bool | None = None,
     ) -> dict[str, Any]:
         """Update a portal page element (full metadata replace).
@@ -2023,8 +2500,16 @@ class PipefyClient:
             page_id: Parent page UUID.
             type: Element type for metadata validation.
             metadata: Complete metadata blob.
-            data_sources: Optional data source bindings.
-            editable: Optional editable flag.
+            data_sources: Data source bindings that replace the element's list;
+                ``[]`` unlinks them all. Omit, with ``portal_uuid``, to keep the
+                current ones; passing the ``dataSources`` and ``editable`` already
+                read from ``get_portal`` skips the second read.
+            portal_uuid: Portal holding the element; required when
+                ``data_sources`` is omitted. The keep path resends the element's
+                ``dataSources`` (``repoId`` and ``fieldKeys``) and, unless
+                ``editable`` is given, its ``editable`` flag.
+            editable: Editable flag; the API requires it when a data source lists
+                ``fieldKeys``.
         """
         return await self._portal_service.update_portal_element(
             element_id,
@@ -2032,19 +2517,29 @@ class PipefyClient:
             type=type,
             metadata=metadata,
             data_sources=data_sources,
+            portal_uuid=portal_uuid,
             editable=editable,
         )
 
     async def delete_portal_element(
-        self, element_id: str, page_id: str
+        self,
+        element_id: str,
+        page_id: str,
+        *,
+        layout: list[PortalPageLayoutRow | dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Delete a portal page element (irreversible).
 
         Args:
             element_id: Element UUID.
             page_id: Parent page UUID.
+            layout: Optional full page layout row array (``get_portal`` ->
+                ``pages[].layout``) with ``element_id`` removed from every row,
+                written in the same call. Omit to leave the grid untouched.
         """
-        return await self._portal_service.delete_portal_element(element_id, page_id)
+        return await self._portal_service.delete_portal_element(
+            element_id, page_id, layout=layout
+        )
 
     async def duplicate_portal_element(
         self,
@@ -2344,7 +2839,7 @@ class PipefyClient:
             search_term: Free-text search.
         """
         rules = await self.get_automations(pipe_id=str(repo_id))
-        if not rules:
+        if not rules["nodes"]:
             return {
                 "automationLogsByRepo": {
                     "nodes": [],

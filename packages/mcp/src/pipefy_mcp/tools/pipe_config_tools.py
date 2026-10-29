@@ -4,7 +4,7 @@ from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.types import ToolAnnotations
-from pipefy_sdk import PipefyClient, PipefyId
+from pipefy_sdk import FieldTypeId, PipefyClient, PipefyId
 from pipefy_sdk.graphql_inputs import (
     CreatePhaseFieldInput,
     UpdateLabelInput,
@@ -16,6 +16,7 @@ from pipefy_sdk.phase_inventory import (
     get_phase_not_found_message,
     is_get_phase_not_found_error,
 )
+from pipefy_sdk.transition_hints import TRANSITION_RULES_HINT
 
 from pipefy_mcp.core.tool_error_envelope import (
     is_unified_envelope_enabled,
@@ -27,6 +28,7 @@ from pipefy_mcp.tools.graphql_error_helpers import (
     extract_error_strings,
     extract_graphql_correlation_id,
     extract_graphql_error_codes,
+    timeout_message_or,
     with_debug_suffix,
 )
 from pipefy_mcp.tools.pagination_helpers import (
@@ -282,10 +284,13 @@ class PipeConfigTools:
             except Exception as exc:  # noqa: BLE001
                 codes = extract_graphql_error_codes(exc)
                 correlation_id = extract_graphql_correlation_id(exc)
-                base = map_delete_pipe_error_to_message(
-                    pipe_id=pipe_id_str,
-                    pipe_name=pipe_name,
-                    codes=codes,
+                base = timeout_message_or(
+                    exc,
+                    map_delete_pipe_error_to_message(
+                        pipe_id=pipe_id_str,
+                        pipe_name=pipe_name,
+                        codes=codes,
+                    ),
                 )
                 return build_delete_pipe_error_payload(
                     message=with_debug_suffix(
@@ -322,10 +327,13 @@ class PipeConfigTools:
             except Exception as exc:  # noqa: BLE001
                 codes = extract_graphql_error_codes(exc)
                 correlation_id = extract_graphql_correlation_id(exc)
-                base = map_delete_pipe_error_to_message(
-                    pipe_id=pipe_id_str,
-                    pipe_name=pipe_name,
-                    codes=codes,
+                base = timeout_message_or(
+                    exc,
+                    map_delete_pipe_error_to_message(
+                        pipe_id=pipe_id_str,
+                        pipe_name=pipe_name,
+                        codes=codes,
+                    ),
                 )
                 return build_delete_pipe_error_payload(
                     message=with_debug_suffix(
@@ -404,8 +412,8 @@ class PipeConfigTools:
 
             Read-only mirror of Pipefy **Phase -> Connections** (GraphQL
             ``phase.cards_can_be_moved_to_phases``). Call before ``move_card_to_phase``
-            to avoid trial-and-error moves. New phases have no edges until configured
-            in the Pipefy UI.
+            to avoid trial-and-error moves. Transition rules are configured in the
+            Pipefy UI and are not editable via API.
 
             Args:
                 phase_id: Source phase ID (typically the card's ``current_phase.id``).
@@ -589,17 +597,26 @@ class PipeConfigTools:
         ) -> dict[str, Any]:
             """Create a phase in a pipe.
 
+            Phase Connections / ``allowed_phases`` (the move-transition rules)
+            are configured in the Pipefy UI and are not editable via API. Call
+            ``get_phase_allowed_move_targets`` on the source phase to read its
+            current move targets before a move. The success payload repeats this
+            as a ``connection_hint`` key.
+
             Args:
                 pipe_id: Pipe that will contain the phase.
                 name: Phase name.
                 done: When True, marks a final/done phase.
-                index: Optional 1-based insert position among workflow phases
-                    returned by ``get_pipe``. Omit to append after existing
-                    phases. Prefer ``1`` or higher for normal layout; ``0``
-                    creates a phase that does not appear in ``get_pipe``'s
-                    ``phases`` list. Index only sets order - it does not
-                    configure Phase Connections / ``allowed_phases`` (UI-only);
-                    call ``get_phase_allowed_move_targets`` before moves.
+                index: Float sort key. A value between two existing keys
+                    inserts between those phases. Equal keys have no fixed
+                    order; use a key no other phase has. A new pipe's Inbox,
+                    Doing and Done keys
+                    are 1, 2 and 3, and 0 omits the phase from ``get_pipe``
+                    phases. ``get_pipe`` returns each key as
+                    ``phases[].index``, in ascending order.
+                    Index only sets order - it does not configure Phase
+                    Connections / ``allowed_phases`` (UI-only); call
+                    ``get_phase_allowed_move_targets`` before moves.
                 description: Optional phase description.
                 debug: When True, append GraphQL codes and correlation_id to errors.
             """
@@ -631,6 +648,7 @@ class PipeConfigTools:
             return build_pipe_mutation_success_payload(
                 label="Phase created.",
                 data=raw,
+                connection_hint=TRANSITION_RULES_HINT,
             )
 
         @mcp.tool(
@@ -653,9 +671,17 @@ class PipeConfigTools:
         ) -> dict[str, Any]:
             """Update a phase.
 
+            ``update_phase`` has no index field. To move a phase that has no
+            cards, delete it and create it again with the sort key.
+
             Pipefy requires the phase name on update. Omit `name` to keep the current
             name (resolved via get_phase_fields). Values identical to the current state
             are accepted but result in a no-op API call.
+
+            Updating a phase does not configure its Phase Connections /
+            ``allowed_phases`` (UI-only, not editable via API). Call
+            ``get_phase_allowed_move_targets`` on the source phase before a move.
+            The success payload repeats this as a ``connection_hint`` key.
 
             Args:
                 phase_id: Phase ID to update.
@@ -739,6 +765,7 @@ class PipeConfigTools:
             return build_pipe_mutation_success_payload(
                 label="Phase updated.",
                 data=raw,
+                connection_hint=TRANSITION_RULES_HINT,
             )
 
         @mcp.tool(
@@ -824,7 +851,7 @@ class PipeConfigTools:
         async def create_phase_field(
             phase_id: PipefyId,
             label: str,
-            field_type: str,
+            field_type: FieldTypeId | str,
             ctx: Context,
             options: list[str] | None = None,
             description: str | None = None,
@@ -834,8 +861,9 @@ class PipeConfigTools:
         ) -> dict[str, Any]:
             """Create a custom field on a phase.
 
-            ``field_type`` is passed through to Pipefy (use schema introspection on
-            ``CreatePhaseFieldInput`` to list valid types).
+            ``field_type`` takes a ``FieldTypeId`` value (lower case, e.g. ``short_text``);
+            other strings pass through and the API validates them. A ``connector`` field
+            also needs ``extra_input.connectedRepoId``: a pipe id, or a table id.
 
             The response includes ``internal_id`` — use that numeric ID (not the slug
             ``id``) for subsequent ``update_phase_field`` or ``delete_phase_field`` calls.
@@ -844,7 +872,7 @@ class PipeConfigTools:
                 phase_id: Phase that will receive the field.
                     Discover via: ``get_pipe(pipe_id).phases[].id``.
                 label: Field label shown in the UI.
-                field_type: Pipefy field type string (API input field ``type``).
+                field_type: A ``FieldTypeId`` value (API input field ``type``).
                 options: Option values for select/radio/checklist fields (e.g. ["Alta", "Média", "Baixa"]).
                 description: Optional field description.
                 required: Whether the field is required.
@@ -891,12 +919,15 @@ class PipeConfigTools:
             try:
                 raw = await client.create_phase_field(create_input)
             except Exception as exc:  # noqa: BLE001
+                # The API's RESOURCE_NOT_FOUND names the phase, the field type, or the
+                # connected repo, so skip only the relabel to "Phase not found".
                 return handle_pipe_config_tool_graphql_error(
                     exc,
                     "Create phase field failed.",
                     debug=debug,
                     resource_kind="phase",
                     resource_id=str(phase_id),
+                    not_found_enrichment=False,
                 )
             return build_pipe_mutation_success_payload(
                 label="Phase field created.",

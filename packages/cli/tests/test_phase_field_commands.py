@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from pipefy_sdk.graphql_inputs import (
     CreatePhaseFieldInput,
     UpdatePhaseFieldInput,
     UpdatePhaseInput,
 )
+from pipefy_sdk.transition_hints import TRANSITION_RULES_HINT
 
 from pipefy_cli.main import app
 
@@ -46,6 +48,10 @@ def test_phase_create_json(runner, clean_pipefy_env, saved_cwd, oauth_env):
     mock_client.create_phase.assert_awaited_once_with(
         "9", "Review", done=False, index=None, description=None
     )
+    # Hint prints on success, on stderr so it never pollutes --json stdout.
+    assert TRANSITION_RULES_HINT in result.stderr
+    assert result.stdout.strip() != ""
+    json.loads(result.stdout)
 
 
 def test_phase_update_resolves_name_json(
@@ -69,6 +75,8 @@ def test_phase_update_resolves_name_json(
     mock_client.update_phase.assert_awaited_once_with(
         UpdatePhaseInput(id="3", description="x", name="Todo")
     )
+    assert TRANSITION_RULES_HINT in result.stderr
+    json.loads(result.stdout)
 
 
 def test_phase_delete_yes(runner, clean_pipefy_env, saved_cwd, oauth_env):
@@ -98,6 +106,41 @@ def test_field_list_json(runner, clean_pipefy_env, saved_cwd, oauth_env):
     mock_client.get_phase_fields.assert_awaited_once_with("1", required_only=False)
 
 
+@pytest.mark.parametrize(
+    ("reserved_key", "value"),
+    [("phase_id", "999"), ("label", "Unexpected label"), ("type", "number")],
+)
+def test_field_create_rejects_reserved_extra_keys(
+    runner, clean_pipefy_env, saved_cwd, oauth_env, reserved_key, value
+):
+    oauth_env("fld-reserved")
+    mock_client = MagicMock()
+    mock_client.create_phase_field = AsyncMock(return_value={"createPhaseField": {}})
+    with patch(
+        "pipefy_cli.commands._common.get_authenticated_client",
+        return_value=mock_client,
+    ) as get_client:
+        result = runner.invoke(
+            app,
+            [
+                "field",
+                "create",
+                "--phase",
+                "2",
+                "--label",
+                "Owner",
+                "--type",
+                "assignee_select",
+                "--extra",
+                json.dumps({reserved_key: value}),
+            ],
+        )
+    assert result.exit_code == 2
+    assert reserved_key in result.stderr
+    get_client.assert_not_called()
+    mock_client.create_phase_field.assert_not_awaited()
+
+
 def test_field_create_json(runner, clean_pipefy_env, saved_cwd, oauth_env):
     oauth_env("fld-cr")
     mock_client = MagicMock()
@@ -124,6 +167,22 @@ def test_field_create_json(runner, clean_pipefy_env, saved_cwd, oauth_env):
     mock_client.create_phase_field.assert_awaited_once_with(
         CreatePhaseFieldInput(phase_id="2", label="Owner", type="assignee_select")
     )
+
+
+def test_field_create_type_completion_offers_field_type_ids(runner):
+    result = runner.invoke(
+        app,
+        [],
+        prog_name="pipefy",
+        env={
+            "_PIPEFY_COMPLETE": "complete_zsh",
+            "_TYPER_COMPLETE_ARGS": "pipefy field create --type checklist",
+        },
+    )
+    assert result.exit_code == 0
+    assert '"checklist_horizontal"' in result.output
+    assert '"checklist_vertical"' in result.output
+    assert "short_text" not in result.output
 
 
 def test_field_update_forwards_extra_phase_id_for_slug_resolution(

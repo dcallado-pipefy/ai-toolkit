@@ -6,15 +6,15 @@ from typing import Any
 
 import typer
 from pipefy_sdk import (
+    RECORDS_MAX_PAGE_SIZE,
     CardSearch,
     CommentInput,
     DeleteCommentInput,
     PipefyClient,
     UpdateCommentInput,
     copy_card_search,
-    filter_editable_field_definitions,
-    filter_fields_by_definitions,
-    skipped_field_ids,
+    parse_record_filter,
+    parse_record_order,
 )
 from pydantic import ValidationError
 
@@ -180,6 +180,86 @@ def card_list(
             pipe_id,
             effective_search,
             include_fields=include_fields,
+            first=first_validated,
+            after=after,
+        )
+
+    run_cli_command(ctx, json_out, factory)
+
+
+@card_app.command("records")
+def card_records(
+    ctx: typer.Context,
+    pipe_id: str = typer.Option(..., "--pipe", help="Pipe id whose cards to load."),
+    where_json: str | None = typer.Option(
+        None,
+        "--where",
+        help='JSON filter object, e.g. {"attribute": "ASSIGNEES", "in": ["<user id>"]}; and/or take a list of filters. field must be the custom field uuid (lowercase, hyphenated). like/ilike ignore case and match each word of the value as a substring, in any order; % and _ are literal.',
+    ),
+    search_term: str | None = typer.Option(
+        None,
+        "--search-term",
+        help='Match title and subtitle fields; for a card id use --where \'{"attribute": "ID", "eq": "<id>"}\'.',
+    ),
+    phase_id: str | None = typer.Option(
+        None, "--phase", help="Only cards currently in this phase."
+    ),
+    order_by_json: str | None = typer.Option(
+        None,
+        "--order-by",
+        help='JSON list, e.g. [{"attribute": "CREATED_AT", "direction": "DESC"}]; field takes the custom field uuid.',
+    ),
+    include_fields: bool = typer.Option(
+        False,
+        "--include-fields",
+        help="Include each card's custom fields.",
+    ),
+    first: int | None = typer.Option(
+        None,
+        "--first",
+        help=f"Max cards per page ({_CARDS_PAGE_SIZE_MIN}-{RECORDS_MAX_PAGE_SIZE}).",
+    ),
+    after: str | None = typer.Option(
+        None,
+        "--after",
+        help="Pagination cursor (pageInfo.endCursor), passed back exactly.",
+    ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        "-j",
+        help="Print machine-readable JSON to stdout.",
+    ),
+) -> None:
+    """List, count and filter the cards of a pipe (records query).
+
+    totalCount counts the whole result. On ASSIGNEES and LABELS, in matches any
+    and contains matches all; like and ilike ignore case and match each word of
+    the value, in any order, with no wildcards; dates are ISO 8601, with an offset
+    on date-time attributes (CREATED_AT, FINISHED_AT) and as a bare date
+    (2026-07-03) on a date field. With --where or
+    --search-term, paging stops at 10,000 cards. Page with --after set to
+    pageInfo.endCursor until hasNextPage is false. For a count, pass --first 1
+    and read totalCount.
+    """
+    where_raw = parse_json_value(where_json, "--where")
+    order_by_raw = parse_json_value(order_by_json, "--order-by")
+    try:
+        where = None if where_raw is None else parse_record_filter(where_raw)
+        order_by = None if order_by_raw is None else parse_record_order(order_by_raw)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    first_validated = validate_cards_page_size(first, max_size=RECORDS_MAX_PAGE_SIZE)
+    phase_id = validate_optional_resource_id(phase_id, "phase_id")
+
+    async def factory(client: PipefyClient):
+        return await client.get_records(
+            pipe_id,
+            where,
+            search_term,
+            phase_id,
+            order_by,
+            include_fields,
             first=first_validated,
             after=after,
         )
@@ -408,39 +488,16 @@ def card_fill(
 ) -> None:
     """Fill phase fields on a card (non-interactive).
 
-    Filters ``--fields`` to editable phase field IDs before ``update_card``.
-    Stricter than MCP ``fill_card_phase_fields`` when the phase reports no
-    editable fields (CLI no-ops; MCP may pass values through unfiltered).
+    Filters ``--fields`` to editable phase field IDs. Dropped keys come back in
+    ``skipped_field_ids``. When nothing survives, no write is issued.
     """
 
     fields = parse_json_object(fields_json, "--fields") or {}
 
     async def factory(client: PipefyClient):
-        if not fields:
-            return {"success": True, "message": "No fields to update."}
-
-        phase_fields_result = await client.get_phase_fields(phase_id, required_only)
-        expected_fields = filter_editable_field_definitions(
-            phase_fields_result.get("fields", [])
+        return await client.fill_card_phase_fields(
+            card_id, phase_id, fields, required_fields_only=required_only
         )
-        field_data = filter_fields_by_definitions(fields, expected_fields)
-        dropped = skipped_field_ids(fields, field_data)
-        if not field_data:
-            result: dict[str, Any] = {
-                "success": True,
-                "message": "No fields to update.",
-            }
-            if dropped:
-                result["skipped_field_ids"] = dropped
-            return result
-        field_updates = [
-            {"field_id": field_id, "value": value}
-            for field_id, value in field_data.items()
-        ]
-        api_response = await client.update_card(card_id, field_updates=field_updates)
-        if dropped:
-            return {**api_response, "skipped_field_ids": dropped}
-        return api_response
 
     run_cli_command(ctx, json_out, factory)
 

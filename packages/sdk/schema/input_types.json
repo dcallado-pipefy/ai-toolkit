@@ -37,7 +37,7 @@
           "name": "field_address",
           "type": "String",
           "defaultValue": null,
-          "description": "The condition field's ID"
+          "description": "The field internal_id (or a native card attribute such as title). A field slug is accepted and resolved to internal_id."
         },
         {
           "name": "id",
@@ -78,7 +78,7 @@
           "name": "expressions_structure",
           "type": "[[ID]]",
           "defaultValue": null,
-          "description": "Array of arrays with the condition's order. Defining groups of \"AND\" and \"OR\""
+          "description": "The outer array is an OR of groups. Each inner array is an AND. The numbers are each expression's structure_id. An empty structure is always true. Every expression appears in the structure exactly once. Expressions with a blank field_address or operation are dropped. Structure ids with no matching expression are dropped."
         }
       ]
     },
@@ -155,7 +155,7 @@
           "name": "custom_validation",
           "type": "String",
           "defaultValue": null,
-          "description": "The regex used to validate the field's value"
+          "description": "short_text and phase take a regex, attachment takes a comma-separated extension list, and any other type rejects a non-blank value"
         },
         {
           "name": "description",
@@ -473,7 +473,7 @@
           "name": "custom_validation",
           "type": "String",
           "defaultValue": null,
-          "description": "The regex used to validate the field's value"
+          "description": "short_text and phase take a regex, attachment takes a comma-separated extension list, and any other type rejects a non-blank value"
         },
         {
           "name": "description",
@@ -522,6 +522,12 @@
           "type": "[String]",
           "defaultValue": null,
           "description": "The field options"
+        },
+        {
+          "name": "pipeUuid",
+          "type": "ID",
+          "defaultValue": null,
+          "description": "The UUID of the pipe the field is in"
         },
         {
           "name": "required",
@@ -581,6 +587,12 @@
           "type": "ID!",
           "defaultValue": null,
           "description": "The phase ID"
+        },
+        {
+          "name": "jumpTargetIds",
+          "type": "[ID!]",
+          "defaultValue": null,
+          "description": "A present list replaces every outgoing transition. An empty list clears them."
         },
         {
           "name": "lateness_time",

@@ -341,17 +341,17 @@ class FieldConditionTools:
             ``internal_id``, ``id``, or ``uuid``. Clear ``required`` first or do
             not use ``hide``.
 
-            **Working example** — hide field ``425848637`` when field ``425848636``
+            **Working example**: hide field ``421234568`` when field ``421234567``
             equals ``"Option A"``::
 
                 create_field_condition(
-                    phase_id="342182326",
+                    phase_id="341234567",
                     name="Hide brief when campaign is Option A",
                     condition={
                         "expressions": [
                             {
                                 "structure_id": 0,
-                                "field_address": "425848636",
+                                "field_address": "421234567",
                                 "operation": "equals",
                                 "value": "Option A"
                             }
@@ -360,16 +360,16 @@ class FieldConditionTools:
                     },
                     actions=[
                         {
-                            "phaseFieldId": "425848637",
+                            "phaseFieldId": "421234568",
                             "actionId": "hide"
                         }
                     ]
                 )
 
-            ``expressions_structure`` is an array of arrays of indices (e.g.
-            ``[[0]]`` for one expression, ``[[0, 1]]`` for AND). Each expression
-            must carry a ``structure_id`` referencing its position in the
-            structure. Omitting either causes ``"Structure can't be blank"``.
+            ``expressions_structure`` is an array of arrays of ``structure_id`` values,
+            not positions (e.g. ``[[0]]`` for one expression, ``[[0, 1]]`` for AND).
+            Each expression must carry its own ``structure_id``. Omitting either causes
+            ``"Structure can't be blank"``.
 
             The SDK normalizes the payload before calling the API
             (``pipefy_sdk.utils.normalize_field_condition_payload``): it drops any
@@ -384,7 +384,7 @@ class FieldConditionTools:
                     Discover via: ``get_pipe(pipe_id)`` then inspect ``phases[].id``.
                 condition: ``ConditionInput`` dict. Must include ``expressions`` (list of expression
                     objects with ``structure_id``, ``field_address``, ``operation``, ``value``) and
-                    ``expressions_structure`` (array of arrays of string indices).
+                    ``expressions_structure`` (array of arrays of ``structure_id`` values).
                     Discover via: ``get_phase_fields(phase_id)[].internal_id`` for ``field_address``.
                 actions: List of ``FieldConditionActionInput`` dicts; each needs ``phaseFieldId``.
                     ``phaseFieldId`` is usually the field's ``internal_id`` from ``get_phase_fields``,
@@ -403,11 +403,6 @@ class FieldConditionTools:
             pid, err = validate_tool_id(phase_id, "phase_id")
             if err is not None:
                 return err
-            if not isinstance(condition, dict):
-                return build_pipe_tool_error_payload(
-                    message="Invalid 'condition': provide an object/dict.",
-                    code="INVALID_ARGUMENTS",
-                )
             if not condition:
                 return build_pipe_tool_error_payload(
                     message="Invalid 'condition': provide a non-empty object (e.g. expressions).",
@@ -422,11 +417,6 @@ class FieldConditionTools:
                     ),
                     code="INVALID_ARGUMENTS",
                 )
-            if extra_input is not None and not isinstance(extra_input, dict):
-                return build_pipe_tool_error_payload(
-                    message="Invalid 'extra_input': provide an object/dict or omit.",
-                    code="INVALID_ARGUMENTS",
-                )
             act_err = field_condition_actions_error_message(actions)
             if act_err:
                 return build_pipe_tool_error_payload(
@@ -438,7 +428,7 @@ class FieldConditionTools:
                 if k not in _CREATE_FIELD_CONDITION_EXTRA_RESERVED
             }
             if name is not None:
-                if not isinstance(name, str) or not name.strip():
+                if not name.strip():
                     return build_pipe_tool_error_payload(
                         message="Invalid 'name': provide a non-empty string or omit.",
                         code="INVALID_ARGUMENTS",
@@ -515,7 +505,7 @@ class FieldConditionTools:
             Prefer the explicit ``condition``, ``actions``, and ``name`` parameters
             (same shapes as ``create_field_condition``) when changing rule logic.
             ``extra_input`` still carries other ``UpdateFieldConditionInput`` keys
-            (e.g. ``index``). ``name`` in ``extra_input`` is also accepted for
+            (e.g. ``clientMutationId``). ``name`` in ``extra_input`` is also accepted for
             back-compat (top-level wins when both are set). ``actions`` in
             ``extra_input`` is rejected (``INVALID_ARGUMENTS``); use the top-level
             ``actions`` argument.
@@ -536,10 +526,9 @@ class FieldConditionTools:
                     Discover via: ``get_phase_fields(phase_id)[].internal_id`` for ``phaseFieldId``.
                 name: Optional new rule name.
                 extra_input: Additional fields to merge into ``UpdateFieldConditionInput``:
-                    ``phase_id`` or ``clientMutationId``. The two mutations spell the
-                    phase differently — ``createFieldConditionInput`` takes ``phaseId``
-                    and this one takes ``phase_id`` — and ``index`` exists only on
-                    create.
+                    ``phase_id`` or ``clientMutationId``. ``createFieldConditionInput``
+                    uses ``phaseId``. ``UpdateFieldConditionInput`` uses ``phase_id``
+                    and does not accept ``index``.
                 debug: When True, append GraphQL codes and correlation_id to errors.
             """
             client = get_pipefy_client(ctx)
@@ -549,22 +538,12 @@ class FieldConditionTools:
             cid_str, err = validate_tool_id(condition_id, "condition_id")
             if err is not None:
                 return err
-            if extra_input is not None and not isinstance(extra_input, dict):
-                return build_pipe_tool_error_payload(
-                    message="Invalid 'extra_input': provide an object/dict or omit.",
-                    code="INVALID_ARGUMENTS",
-                )
             if extra_input is not None and "actions" in extra_input:
                 return build_pipe_tool_error_payload(
                     message=(
                         "Invalid 'extra_input': do not pass 'actions' here; use the "
                         "top-level 'actions' argument."
                     ),
-                    code="INVALID_ARGUMENTS",
-                )
-            if condition is not None and not isinstance(condition, dict):
-                return build_pipe_tool_error_payload(
-                    message="Invalid 'condition': provide an object/dict or omit.",
                     code="INVALID_ARGUMENTS",
                 )
             if condition is not None:
@@ -590,7 +569,7 @@ class FieldConditionTools:
                 if k not in _UPDATE_FIELD_CONDITION_EXTRA_RESERVED
             }
             if name is not None:
-                if not isinstance(name, str) or not name.strip():
+                if not name.strip():
                     return build_pipe_tool_error_payload(
                         message="Invalid 'name': provide a non-empty string or omit.",
                         code="INVALID_ARGUMENTS",

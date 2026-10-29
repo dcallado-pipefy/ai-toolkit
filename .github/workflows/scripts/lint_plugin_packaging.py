@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""Validate plugin packaging: marketplaces, both plugin manifests, and .mcp.json."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, NamedTuple
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PLUGIN_DIR = Path("plugins/pipefy")
+MARKETPLACE_SOURCE = "./plugins/pipefy"
+
+PLUGIN_NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$")
+PLACEHOLDER_RE = re.compile(r"\$\{[^}]*\}")
+PATH_LIST_FIELDS = ("skills", "commands", "agents", "rules", "hooks")
+ALLOWED_MCP_TOP_LEVEL_KEYS = ("mcpServers",)
+ALLOWED_MCP_SERVER_KEYS = ("type", "url", "auth", "oauth")
+ALLOWED_MCP_AUTH_KEYS = ("CLIENT_ID",)
+ALLOWED_MCP_OAUTH_KEYS = ("clientId",)
+FORBIDDEN_MANIFEST_KEYS = ("variables",)
+HOSTED_SERVER_NAME = "pipefy"
+HOSTED_MCP_URL = "https://mcp.pipefy.com/mcp"
+HOSTED_MCP_TYPE = "http"
+HOSTED_CLIENT_ID = "pipefy-mcp"
+HOSTED_MCP_FILENAME = ".mcp.json"
+CLAUDE_PLUGIN_MANIFEST = Path(".claude-plugin/plugin.json")
+CURSOR_PLUGIN_MANIFEST = Path(".cursor-plugin/plugin.json")
+MARKETPLACE_MANIFESTS = (
+    Path(".claude-plugin/marketplace.json"),
+    Path(".cursor-plugin/marketplace.json"),
+)
+REQUIRED_MANIFEST_MCP_SERVERS = "./.mcp.json"
+FORBIDDEN_ROOT_MCP_JSON = "mcp.json"
+REQUIRED_DISPLAY_NAME = "Pipefy"
+REQUIRED_MARKETPLACE_NAME = "pipefy"
+# The Claude directory validation times out on large plugin folders: on the
+# portal, folders of about 500 files or more timed out and folders of 62 to 154
+# files passed. The cap keeps a wide margin below that. The size and symbolic
+# link rules are the directory's own pre-submission limits.
+MAX_PLUGIN_FILES = 200
+MAX_NON_IMAGE_BYTES = 256 * 1024
+IMAGE_SUFFIXES = frozenset({".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp"})
+GIT_SYMLINK_MODE = "120000"
+# The directory flags a download piped into a shell (RUNTIME_FETCH_EXEC) as an
+# install-time risk, even in Markdown that tells the agent to run it.
+DOWNLOAD_INTO_A_SHELL = re.compile(r"\|\s*(ba|z|da)?sh\b|sh -c \"\$\((curl|wget)\b")
+
+
+class PluginFile(NamedTuple):
+    path: str
+    size: int
+    is_symlink: bool
+
+
+def _rel(root: Path, path: Path) -> Path:
+    return path.relative_to(root)
+
+
+def _load_json(root: Path, path: Path) -> dict[str, Any] | str:
+    rel = _rel(root, path)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"could not read {rel}: {exc}"
+    except UnicodeDecodeError as exc:
+        return f"{rel} is not valid UTF-8: {exc}; expected UTF-8 text"
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return f"{rel} is not valid JSON: {exc}; expected a JSON object"
+    if not isinstance(data, dict):
+        return f"{rel} parsed as {type(data).__name__}, expected a JSON object"
+    return data
+
+
+def _normalize_repo_rel(raw: str) -> str:
+    return raw.replace("\\", "/").removeprefix("./").rstrip("/")
+
+
+def skill_dirs_from_ls_files(lines: list[str]) -> set[str]:
+    """Published skill directories: parents of tracked SKILL.md files."""
+    dirs: set[str] = set()
+    for line in lines:
+        posix = line.replace("\\", "/")
+        dirs.add(_normalize_repo_rel(Path(posix).parent.as_posix()))
+    return dirs
+
+
+def _tracked_skill_md_paths(root: Path) -> list[str] | str:
+    proc = subprocess.run(
+        ["git", "ls-files", "--", "skills/**/SKILL.md"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "no output"
+        return (
+            f"git ls-files failed with exit {proc.returncode} "
+            f"(cwd={root}, pathspec='skills/**/SKILL.md'): {detail}"
+        )
+    return proc.stdout.splitlines()
+
+
+def _tracked_plugin_files(plugin: Path) -> list[PluginFile] | str:
+    proc = subprocess.run(
+        ["git", "ls-files", "-s", "--", "."],
+        cwd=plugin,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or "no output"
+        return (
+            f"git ls-files failed with exit {proc.returncode} "
+            f"(cwd={plugin}, pathspec='.'): {detail}"
+        )
+    files: list[PluginFile] = []
+    for line in proc.stdout.splitlines():
+        meta, path = line.split("\t", 1)
+        mode = meta.split(" ", 1)[0]
+        files.append(
+            PluginFile(
+                path=path,
+                size=(plugin / path).lstat().st_size,
+                is_symlink=mode == GIT_SYMLINK_MODE,
+            )
+        )
+    return files
+
+
+def lint_directory_limits(files: list[PluginFile]) -> list[str]:
+    """Return errors for a plugin folder outside the Claude directory limits."""
+    errors: list[str] = []
+    if len(files) > MAX_PLUGIN_FILES:
+        errors.append(
+            f"{PLUGIN_DIR} has {len(files)} tracked files, expected at most "
+            f"{MAX_PLUGIN_FILES} so the Claude directory validation does not "
+            "time out"
+        )
+    for file in files:
+        if file.is_symlink:
+            errors.append(
+                f"{PLUGIN_DIR / file.path} is a symbolic link; the Claude "
+                "directory rejects symbolic links in the plugin folder"
+            )
+        elif (
+            Path(file.path).suffix.lower() not in IMAGE_SUFFIXES
+            and file.size > MAX_NON_IMAGE_BYTES
+        ):
+            errors.append(
+                f"{PLUGIN_DIR / file.path} is {file.size} bytes, expected at "
+                f"most {MAX_NON_IMAGE_BYTES} for a file that is not an image"
+            )
+    return errors
+
+
+def lint_no_download_into_a_shell(texts: dict[str, str]) -> list[str]:
+    """Return errors for plugin files that pipe a download into a shell."""
+    return [
+        f"{PLUGIN_DIR / path} pipes a download into a shell; the Claude "
+        "directory flags it as an install-time risk, so link to the doc that "
+        "holds the command"
+        for path, text in texts.items()
+        if DOWNLOAD_INTO_A_SHELL.search(text)
+    ]
+
+
+def _plugin_texts(plugin: Path, files: list[PluginFile]) -> dict[str, str]:
+    return {
+        file.path: (plugin / file.path).read_text(encoding="utf-8", errors="replace")
+        for file in files
+        if not file.is_symlink and Path(file.path).suffix.lower() not in IMAGE_SUFFIXES
+    }
+
+
+def _path_field_error(
+    root: Path, manifest_rel: Path, field: str, raw: str
+) -> str | None:
+    if not raw.strip():
+        return (
+            f"{manifest_rel} field {field} has empty path {raw!r}, "
+            "expected a relative path with no '..'"
+        )
+    if Path(raw).is_absolute():
+        return (
+            f"{manifest_rel} field {field} has absolute path {raw!r}, "
+            "expected a relative path with no '..'"
+        )
+    parts = Path(_normalize_repo_rel(raw)).parts
+    if ".." in parts:
+        return (
+            f"{manifest_rel} field {field} has path {raw!r} containing '..', "
+            "expected a relative path inside the repository"
+        )
+    target = root / raw
+    if not target.exists():
+        return (
+            f"{manifest_rel} field {field} path {raw!r} does not exist on disk, "
+            f"expected a relative path that exists under {root}"
+        )
+    if field == "logo" and target.is_dir():
+        return (
+            f"{manifest_rel} field {field} path {raw!r} is a directory, expected a file"
+        )
+    return None
+
+
+def _iter_path_values(manifest: dict[str, Any]) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for field in PATH_LIST_FIELDS:
+        value = manifest.get(field)
+        if isinstance(value, list):
+            found.extend((field, item) for item in value if isinstance(item, str))
+        elif isinstance(value, str):
+            found.append((field, value))
+    return found
+
+
+def _lint_plugin_name(manifest_rel: Path, manifest: dict[str, Any]) -> list[str]:
+    name = manifest.get("name")
+    if not isinstance(name, str) or PLUGIN_NAME_RE.fullmatch(name) is None:
+        return [
+            f"{manifest_rel} name is {name!r}, expected a string matching "
+            "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$"
+        ]
+    return []
+
+
+def _lint_forbidden_manifest_keys(
+    manifest_rel: Path, manifest: dict[str, Any]
+) -> list[str]:
+    errors: list[str] = []
+    for key in FORBIDDEN_MANIFEST_KEYS:
+        if key in manifest:
+            errors.append(
+                f"{manifest_rel} declares {key}, which this plugin must not "
+                f"ship; expected no {key} field"
+            )
+    return errors
+
+
+def _lint_manifest_mcp_pointer(
+    manifest_rel: Path, manifest: dict[str, Any]
+) -> list[str]:
+    value = manifest.get("mcpServers")
+    if value == REQUIRED_MANIFEST_MCP_SERVERS:
+        return []
+    shown = (
+        repr(value) if value is None or isinstance(value, str) else "a non-path value"
+    )
+    return [
+        f"{manifest_rel} mcpServers is {shown}, expected "
+        f"{REQUIRED_MANIFEST_MCP_SERVERS!r}"
+    ]
+
+
+def _lint_no_forbidden_root_mcp_json(root: Path) -> list[str]:
+    leftover = root / FORBIDDEN_ROOT_MCP_JSON
+    if not leftover.exists():
+        return []
+    return [f"{FORBIDDEN_ROOT_MCP_JSON} exists; expected only {HOSTED_MCP_FILENAME}"]
+
+
+def _lint_display_name(manifest_rel: Path, manifest: dict[str, Any]) -> list[str]:
+    value = manifest.get("displayName")
+    if value == REQUIRED_DISPLAY_NAME:
+        return []
+    shown = (
+        repr(value) if value is None or isinstance(value, str) else "a non-string value"
+    )
+    return [
+        f"{manifest_rel} displayName is {shown}, expected {REQUIRED_DISPLAY_NAME!r}"
+    ]
+
+
+def _lint_marketplace_name(root: Path) -> list[str]:
+    path = root / ".cursor-plugin/marketplace.json"
+    loaded = _load_json(root, path)
+    if isinstance(loaded, str):
+        return [loaded]
+    name = loaded.get("name")
+    if name == REQUIRED_MARKETPLACE_NAME:
+        return []
+    shown = (
+        repr(name) if name is None or isinstance(name, str) else "a non-string value"
+    )
+    return [
+        f"{_rel(root, path)} name is {shown}, expected "
+        f"{REQUIRED_MARKETPLACE_NAME!r} so Cursor does not title-case the "
+        "GitHub slug ai-toolkit to 'Ai Toolkit'"
+    ]
+
+
+def _lint_marketplace_source(root: Path) -> list[str]:
+    errors: list[str] = []
+    for manifest in MARKETPLACE_MANIFESTS:
+        path = root / manifest
+        loaded = _load_json(root, path)
+        if isinstance(loaded, str):
+            errors.append(loaded)
+            continue
+        plugins = loaded.get("plugins")
+        entries = plugins if isinstance(plugins, list) else []
+        sources = [
+            entry.get("source")
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("name") == REQUIRED_MARKETPLACE_NAME
+        ]
+        if sources != [MARKETPLACE_SOURCE]:
+            errors.append(
+                f"{manifest} lists plugin {REQUIRED_MARKETPLACE_NAME!r} with "
+                f"source {sources!r}, expected exactly one entry with source "
+                f"{MARKETPLACE_SOURCE!r}"
+            )
+    return errors
+
+
+def _lint_commands_suppressed(
+    manifest_rel: Path, manifest: dict[str, Any]
+) -> list[str]:
+    commands = manifest.get("commands")
+    if commands != []:
+        return [
+            f"{manifest_rel} commands is {commands!r}, expected an empty list "
+            "so Cursor does not discover the plugin commands/ directory"
+        ]
+    return []
+
+
+def _lint_logo(root: Path, manifest_rel: Path, manifest: dict[str, Any]) -> list[str]:
+    if "logo" not in manifest:
+        return [
+            f"{manifest_rel} logo is missing, expected a relative file path or "
+            "https URL"
+        ]
+    logo = manifest["logo"]
+    if not isinstance(logo, str) or not logo.strip():
+        return [
+            f"{manifest_rel} logo is {logo!r}, expected a non-empty relative "
+            "file path or https URL"
+        ]
+    if logo.startswith("https://"):
+        return []
+    err = _path_field_error(root, manifest_rel, "logo", logo)
+    return [err] if err is not None else []
+
+
+def _lint_skill_set(
+    manifest_rel: Path, manifest: dict[str, Any], tree: set[str]
+) -> list[str]:
+    skills = manifest.get("skills")
+    if not isinstance(skills, list) or not all(
+        isinstance(item, str) for item in skills
+    ):
+        return [
+            f"{manifest_rel} skills is {skills!r}, expected a list of relative "
+            "skill directories"
+        ]
+    declared = {_normalize_repo_rel(item) for item in skills}
+    errors: list[str] = []
+    for path in sorted(tree - declared):
+        errors.append(
+            f"{manifest_rel} skills array is missing {path!r}; expected the "
+            "manifest to list every published skill directory from git ls-files "
+            "'skills/**/SKILL.md'"
+        )
+    for path in sorted(declared - tree):
+        errors.append(
+            f"{manifest_rel} skills array lists {path!r}, which is not a tracked "
+            "skill directory; expected a path from git ls-files "
+            "'skills/**/SKILL.md'"
+        )
+    return errors
+
+
+def _lint_hosted_auth(rel: Path, name: str, server: dict[str, Any]) -> list[str]:
+    """Check ``auth`` against the allowlist ADR-004 pins.
+
+    Unexpected keys are named but never echoed: an unenumerated key is exactly
+    where a committed credential would sit, and this message reaches public CI
+    logs. Received field values are omitted for the same reason.
+    """
+    errors: list[str] = []
+    auth = server.get("auth")
+    if not isinstance(auth, dict):
+        errors.append(
+            f"{rel} server {name!r} has auth that is not an object, "
+            f"expected an object with CLIENT_ID {HOSTED_CLIENT_ID!r}"
+        )
+        return errors
+    client_id = auth.get("CLIENT_ID")
+    if client_id != HOSTED_CLIENT_ID:
+        errors.append(
+            f"{rel} server {name!r} has auth.CLIENT_ID that is not {HOSTED_CLIENT_ID!r}"
+        )
+    for key in sorted(set(auth) - set(ALLOWED_MCP_AUTH_KEYS)):
+        errors.append(
+            f"{rel} server {name!r} has unexpected auth key {key!r}; expected "
+            f"only {', '.join(ALLOWED_MCP_AUTH_KEYS)} on a URL-only server"
+        )
+    return errors
+
+
+def _lint_hosted_oauth(rel: Path, name: str, server: dict[str, Any]) -> list[str]:
+    """Check ``oauth`` against the same pins as ``auth``.
+
+    Cursor reads the client id from ``auth.CLIENT_ID`` and Claude Code from
+    ``oauth.clientId``; each ignores the other's key, so the shared file carries both.
+    """
+    errors: list[str] = []
+    oauth = server.get("oauth")
+    if not isinstance(oauth, dict):
+        errors.append(
+            f"{rel} server {name!r} has oauth that is not an object, "
+            f"expected an object with clientId {HOSTED_CLIENT_ID!r}"
+        )
+        return errors
+    client_id = oauth.get("clientId")
+    if client_id != HOSTED_CLIENT_ID:
+        errors.append(
+            f"{rel} server {name!r} has oauth.clientId that is not {HOSTED_CLIENT_ID!r}"
+        )
+    for key in sorted(set(oauth) - set(ALLOWED_MCP_OAUTH_KEYS)):
+        errors.append(
+            f"{rel} server {name!r} has unexpected oauth key {key!r}; expected "
+            f"only {', '.join(ALLOWED_MCP_OAUTH_KEYS)} on a URL-only server"
+        )
+    return errors
+
+
+def _lint_mcp(root: Path, mcp_path: Path) -> list[str]:
+    loaded = _load_json(root, mcp_path)
+    if isinstance(loaded, str):
+        return [loaded]
+    servers = loaded.get("mcpServers")
+    rel = _rel(root, mcp_path)
+    if not isinstance(servers, dict):
+        return [
+            f"{rel} mcpServers is not an object, expected an object with exactly "
+            "one server"
+        ]
+    if len(servers) != 1:
+        return [f"{rel} mcpServers has {len(servers)} server(s), expected exactly one"]
+    errors: list[str] = []
+    for key in sorted(set(loaded) - set(ALLOWED_MCP_TOP_LEVEL_KEYS)):
+        errors.append(
+            f"{rel} has unexpected top-level key {key!r}; expected only "
+            f"{', '.join(ALLOWED_MCP_TOP_LEVEL_KEYS)}"
+        )
+    name, server = next(iter(servers.items()))
+    if not isinstance(server, dict):
+        return [
+            f"{rel} server {name!r} is not an object, expected an object with a "
+            "url and no command, args, or env"
+        ]
+    if name != HOSTED_SERVER_NAME:
+        errors.append(f"{rel} server key is {name!r}, expected {HOSTED_SERVER_NAME!r}")
+    # Claude Code parses a url entry without type as stdio and drops it at load.
+    if server.get("type") != HOSTED_MCP_TYPE:
+        errors.append(f"{rel} server {name!r} has type that is not {HOSTED_MCP_TYPE!r}")
+    url = server.get("url")
+    if url != HOSTED_MCP_URL:
+        errors.append(f"{rel} server {name!r} has url that is not {HOSTED_MCP_URL!r}")
+    for key in sorted(set(server) - set(ALLOWED_MCP_SERVER_KEYS)):
+        errors.append(
+            f"{rel} server {name!r} has unexpected key {key!r}; expected only "
+            f"{', '.join(ALLOWED_MCP_SERVER_KEYS)} on a URL-only server"
+        )
+    errors.extend(_lint_hosted_auth(rel, name, server))
+    errors.extend(_lint_hosted_oauth(rel, name, server))
+    try:
+        text = mcp_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        errors.append(f"could not re-read {rel} for placeholder scan: {exc}")
+        return errors
+    match = PLACEHOLDER_RE.search(text)
+    if match is not None:
+        errors.append(
+            f"{rel} contains placeholder {match.group(0)!r}; expected no "
+            "${...} placeholders"
+        )
+    return errors
+
+
+def _lint_default_skill_discovery(root: Path, manifest_path: Path) -> list[str]:
+    loaded = _load_json(root, manifest_path)
+    if isinstance(loaded, str):
+        return [loaded]
+    if "skills" not in loaded:
+        return []
+    return [
+        f"{_rel(root, manifest_path)} declares skills; expected no skills field, "
+        "so Claude Code loads every folder under skills/"
+    ]
+
+
+def _lint_tracked_skill_manifest(
+    root: Path, manifest_path: Path, tree: set[str]
+) -> list[str]:
+    loaded = _load_json(root, manifest_path)
+    if isinstance(loaded, str):
+        return [loaded]
+    return _lint_skill_set(_rel(root, manifest_path), loaded, tree)
+
+
+def collect_errors(root: Path, skill_md_paths: list[str]) -> list[str]:
+    """Return packaging errors for the repository at ``root``.
+
+    ``skill_md_paths`` is the ``git ls-files 'skills/**/SKILL.md'`` listing,
+    run inside the plugin folder ``root / PLUGIN_DIR``.
+    """
+    plugin = root / PLUGIN_DIR
+    manifest_path = plugin / CURSOR_PLUGIN_MANIFEST
+    mcp_path = plugin / HOSTED_MCP_FILENAME
+    loaded = _load_json(root, manifest_path)
+    if isinstance(loaded, str):
+        return [loaded]
+
+    manifest_rel = _rel(root, manifest_path)
+    errors: list[str] = []
+    errors.extend(_lint_plugin_name(manifest_rel, loaded))
+    errors.extend(_lint_display_name(manifest_rel, loaded))
+    errors.extend(_lint_forbidden_manifest_keys(manifest_rel, loaded))
+    errors.extend(_lint_manifest_mcp_pointer(manifest_rel, loaded))
+    errors.extend(_lint_marketplace_name(root))
+    errors.extend(_lint_marketplace_source(root))
+    errors.extend(_lint_no_forbidden_root_mcp_json(plugin))
+    errors.extend(_lint_commands_suppressed(manifest_rel, loaded))
+    errors.extend(_lint_logo(plugin, manifest_rel, loaded))
+    published = skill_dirs_from_ls_files(skill_md_paths)
+    errors.extend(_lint_tracked_skill_manifest(root, manifest_path, published))
+    errors.extend(_lint_default_skill_discovery(root, plugin / CLAUDE_PLUGIN_MANIFEST))
+    for field, raw in _iter_path_values(loaded):
+        err = _path_field_error(plugin, manifest_rel, field, raw)
+        if err is not None:
+            errors.append(err)
+    errors.extend(_lint_mcp(root, mcp_path))
+    return errors
+
+
+def main() -> int:
+    listing = _tracked_skill_md_paths(REPO_ROOT / PLUGIN_DIR)
+    if isinstance(listing, str):
+        print("Plugin packaging FAILED:", file=sys.stderr)
+        print(f"  {listing}", file=sys.stderr)
+        return 1
+
+    errors = collect_errors(REPO_ROOT, listing)
+    plugin = REPO_ROOT / PLUGIN_DIR
+    files = _tracked_plugin_files(plugin)
+    if isinstance(files, str):
+        errors.append(files)
+    else:
+        errors.extend(lint_directory_limits(files))
+        errors.extend(lint_no_download_into_a_shell(_plugin_texts(plugin, files)))
+    if errors:
+        print("Plugin packaging FAILED:", file=sys.stderr)
+        for err in errors:
+            print(f"  {err}", file=sys.stderr)
+        return 1
+    print("Plugin packaging passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

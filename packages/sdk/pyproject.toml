@@ -6,12 +6,15 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "email-validator>=2.2.0",
-    "gql[httpx]>=4.0.0,<5",
+    # Below 4.4: its transport switches to httpx2, which rejects pipefy_auth's
+    # httpx.Auth classes. See docs/dependencies.md before lifting.
+    "gql[httpx]>=4.0.0,<4.4",
     "httpx>=0.27.0",
     "openpyxl>=3.1.5",
-    "pipefy-infra==0.5.0-beta.1",
+    "pipefy-infra==0.5.5-beta.1",
     "pydantic>=2.13.4,<3",
     "pydantic-settings>=2.8.1",
+    "pyyaml>=6.0.3",
     "rapidfuzz>=3.14.3",
 ]
 
@@ -31,6 +34,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pipefy_sdk"]
+
+[tool.hatch.build.hooks.custom]
 
 [tool.hatch.version]
 path = "src/pipefy_sdk/__init__.py"
