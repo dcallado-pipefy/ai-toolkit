@@ -32,6 +32,15 @@ from pipefy_sdk.graphql_executor import (
     GraphQLEndpoint,
     GraphQLExecutor,
 )
+from pipefy_sdk.graphql_inputs import (
+    CreateFieldConditionInput,
+    CreatePhaseFieldInput,
+    UpdateFieldConditionInput,
+    UpdateLabelInput,
+    UpdatePhaseFieldInput,
+    UpdatePhaseInput,
+    UpdatePipeInput,
+)
 from pipefy_sdk.member_removal import MemberRemovalResult, verify_member_removal
 from pipefy_sdk.models.ai_agent import (
     BehaviorInput,
@@ -49,7 +58,6 @@ from pipefy_sdk.models.attachment import (
     AttachmentUploadResult,
     PresignedUploadTarget,
 )
-from pipefy_sdk.models.field_definition import FieldTypeId
 from pipefy_sdk.models.inbox_email import InboxEmailDraft
 from pipefy_sdk.models.knowledge_base import DataLookupCondition
 from pipefy_sdk.models.portal import (
@@ -404,9 +412,9 @@ class PipefyClient:
             labels=labels,
         )
 
-    async def update_pipe(self, pipe_id: str | int, **attrs: Any) -> dict:
-        """Update pipe attributes (see Pipefy `UpdatePipeInput`)."""
-        return await self._pipe_config_service.update_pipe(pipe_id, **attrs)
+    async def update_pipe(self, input: UpdatePipeInput) -> dict:
+        """Update pipe attributes."""
+        return await self._pipe_config_service.update_pipe(input)
 
     async def delete_pipe(self, pipe_id: str | int) -> dict:
         """Delete a pipe by ID (permanent)."""
@@ -440,32 +448,29 @@ class PipefyClient:
             description=description,
         )
 
-    async def update_phase(self, phase_id: str | int, **attrs: Any) -> dict:
-        """Update phase attributes (see Pipefy `UpdatePhaseInput`)."""
-        return await self._pipe_config_service.update_phase(phase_id, **attrs)
+    async def update_phase(self, input: UpdatePhaseInput) -> dict:
+        """Update phase attributes."""
+        return await self._pipe_config_service.update_phase(input)
 
     async def delete_phase(self, phase_id: str | int) -> dict:
         """Delete a phase by ID (permanent)."""
         return await self._pipe_config_service.delete_phase(phase_id)
 
-    async def create_phase_field(
-        self,
-        phase_id: str | int,
-        label: str,
-        field_type: FieldTypeId | str,
-        **attrs: Any,
-    ) -> dict:
-        """Create a field on a phase (`field_type`: a `FieldTypeId` value, passed through)."""
-        return await self._pipe_config_service.create_phase_field(
-            phase_id,
-            label,
-            field_type,
-            **attrs,
-        )
+    async def create_phase_field(self, input: CreatePhaseFieldInput) -> dict:
+        """Create a field on a phase (`type` is passed through to the API)."""
+        return await self._pipe_config_service.create_phase_field(input)
 
-    async def update_phase_field(self, field_id: str | int, **attrs: Any) -> dict:
-        """Update a phase field (see Pipefy `UpdatePhaseFieldInput`)."""
-        return await self._pipe_config_service.update_phase_field(field_id, **attrs)
+    async def update_phase_field(
+        self,
+        input: UpdatePhaseFieldInput,
+        *,
+        phase_id: str | int | None = None,
+        pipe_id: str | int | None = None,
+    ) -> dict:
+        """Update a phase field, resolving a slug `id` when `phase_id`/`pipe_id` is given."""
+        return await self._pipe_config_service.update_phase_field(
+            input, phase_id=phase_id, pipe_id=pipe_id
+        )
 
     async def delete_phase_field(
         self,
@@ -482,31 +487,21 @@ class PipefyClient:
         """Create a label on a pipe."""
         return await self._pipe_config_service.create_label(pipe_id, name, color)
 
-    async def update_label(self, label_id: str | int, **attrs: Any) -> dict:
-        """Update a label (see Pipefy `UpdateLabelInput`)."""
-        return await self._pipe_config_service.update_label(label_id, **attrs)
+    async def update_label(self, input: UpdateLabelInput) -> dict:
+        """Update a label. The API requires both `name` and `color` on every update."""
+        return await self._pipe_config_service.update_label(input)
 
     async def delete_label(self, label_id: str | int) -> dict:
         """Delete a label by ID (permanent)."""
         return await self._pipe_config_service.delete_label(label_id)
 
-    async def create_field_condition(
-        self,
-        phase_id: str | int,
-        condition: dict[str, Any],
-        actions: list[dict[str, Any]],
-        **attrs: Any,
-    ) -> dict:
-        """Create a field condition (``createFieldCondition`` / ``createFieldConditionInput``)."""
-        return await self._pipe_config_service.create_field_condition(
-            phase_id, condition, actions, **attrs
-        )
+    async def create_field_condition(self, input: CreateFieldConditionInput) -> dict:
+        """Create a field condition (``createFieldCondition``)."""
+        return await self._pipe_config_service.create_field_condition(input)
 
-    async def update_field_condition(self, condition_id: str, **attrs: Any) -> dict:
+    async def update_field_condition(self, input: UpdateFieldConditionInput) -> dict:
         """Update an existing field condition."""
-        return await self._pipe_config_service.update_field_condition(
-            condition_id, **attrs
-        )
+        return await self._pipe_config_service.update_field_condition(input)
 
     async def delete_field_condition(self, condition_id: str) -> dict:
         """Delete a field condition by ID (permanent)."""
