@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **SDK HTML interface actions**: `PipefyClient.set_interface_actions` declares the actions an HTML interface's `customCode` element can run from a `data-pfy-action` button: `openStartForm` (`repoId`), `openRecord` (`sourceId`, optional `display`, `fieldKeys` and `pageId`) and `triggerAutomation` (`sourceId`, `automationIds`, optional `label`). The list replaces the element's `metadata.actions`; its other metadata keys and its data sources are read and sent back unchanged, since the update replaces both. `editable`, which `data-pfy-editable` fields need to save, is kept unless passed. Actions are parsed into the `InterfaceAction` models before any call (a known `kind`, a unique `actionId` of 1 to 64 letters, digits, underscores or hyphens, `pageId` with `display: "page"`, at least one automation id, at most 50 actions), then each `sourceId`, `repoId` and `openRecord` `fieldKeys` is checked against the element's sources before the update, and a failure names `actions[index].key`.
+
 ### Changed
 
 - SDK pipe-configuration writes now take typed models from `pipefy_sdk.graphql_inputs`. This changes the SDK signatures of `update_pipe`, `update_phase`, `create_phase_field`, `update_phase_field`, `update_label`, `create_field_condition`, and `update_field_condition`. For example, use `client.update_pipe(UpdatePipeInput(id=pipe_id, name="X"))`. Models include the identifier and reject unknown fields before a request, including unknown nested fields. `update_phase_field` keeps `phase_id` and `pipe_id` as keyword arguments for slug resolution. `normalize_field_condition_fields` repairs accepted list shapes before parsing, including `expressions_structure: [0]` into `[[0]]`. The generated `ConditionExpressionInput` mirrors the schema. AI automations still use the separate permissive model. MCP tool names, argument schemas, and CLI options remain unchanged. Other SDK writes retain their existing signatures.
