@@ -141,7 +141,7 @@ Sixteen values accepted by `create_portal_element` / `update_portal_element` (SD
 
 - `openStartForm` with `repoId`, the `repoId` of one of the element's sources: opens that repo's start form.
 - `openRecord` with `sourceId`, the `id` of one of the element's sources, and optional `display` (`modal`, the default, or `page`), `fieldKeys` (keys of that source for the modal to show) and `pageId` (required with `page`: a record layout page of the interface for the source's repo).
-- `triggerAutomation` with `sourceId`, `automationIds` (one or more manually triggered automations of the source's repo) and optional `label`.
+- `triggerAutomation` with `sourceId`, `automationIds` (one or more manually triggered automations of the source's repo, each a string of digits) and optional `label`.
 
 `openRecord` and `triggerAutomation` act on a record, so their buttons go inside a `data-pfy-row` clone or a source container with `data-pfy-record`. The tool reads the element, checks every `sourceId`, `repoId` and `openRecord` `fieldKeys` against its sources before the update, and sends its other metadata keys and its sources back unchanged. `editable` is kept unless passed; it turns on viewer edits for the element's `data-pfy-editable` fields, and `dataPfyVocabulary` in `get_interface_html_guidelines` says which edits the API then accepts. Each problem in the list comes back as `INVALID_ARGUMENTS` naming `actions[index].key`.
 

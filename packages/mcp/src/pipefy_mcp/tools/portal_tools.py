@@ -395,7 +395,7 @@ class PortalTools:
               "sourceId": "open-requests", "fieldKeys": ["title"]}``.
             - ``triggerAutomation``: ``sourceId`` as above, ``automationIds``
               (one or more manually triggered automations of the source's
-              repo) and optional ``label``. Example: ``{"actionId": "approve",
+              repo, each a string of digits) and optional ``label``. Example: ``{"actionId": "approve",
               "kind": "triggerAutomation", "sourceId": "open-requests",
               "automationIds": ["301"]}``.
 
